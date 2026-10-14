@@ -73,6 +73,12 @@ class ForwarderSettings:
     # 可选：指定 Chromium/Chrome 可执行文件路径（不设置则用 playwright install chromium 安装的版本）
     chromium_path: str = field(default_factory=lambda: _env("DOUYIN_CHROMIUM_PATH"))
 
+    # ─────────────── Telegram 推送（可选） ───────────────
+    # 开启后：解析完成的媒体自动推送至指定群组/频道
+    tg_push: bool = field(default_factory=lambda: _env_bool("TG_PUSH", False))
+    # 目标：@用户名（公开频道/群）、-100 开头的数字 ID（私有）、或 t.me 链接
+    tg_target: str = field(default_factory=lambda: _env("TG_TARGET_CHAT"))
+
     # ─────────────── 解析/归档 ───────────────
     output_dir: Path = field(default_factory=lambda: _env_path("FORWARDER_OUTPUT_DIR", ROOT_DIR / "output"))
     # 两个视频之间的最小解析间隔（秒），避免请求过于频繁
@@ -107,6 +113,7 @@ class ForwarderSettings:
             f"  解析最小间隔     : {self.parse_min_interval}s",
             f"  输出目录         : {self.output_dir}",
             f"  跳过媒体处理     : {self.skip_media_processing}",
+            f"  TG 推送          : {('已启用 → ' + self.tg_target) if self.tg_push else '未启用'}",
             f"  调试/转储 HTML   : {self.debug}/{self.dump_html}",
         ]
         return "\n".join(lines)

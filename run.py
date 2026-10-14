@@ -39,14 +39,24 @@ def _bootstrap() -> None:
     # 1) 工作目录 → parse_hub_bot（原项目 data/ 与 logs/ 均按相对路径解析）
     os.chdir(PARSE_HUB_BOT_DIR)
 
-    # 2) Telegram 占位配置：原项目 BotSettings 的必填项；本服务不会启动 TG Bot
+    # 2) 先加载用户配置（根目录 .env、parse_hub_bot/.env），再为缺失项注入占位值——
+    #    这样配置了真实 Telegram 凭据（API_ID/API_HASH/BOT_TOKEN）时，TG 推送可直接使用
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(ROOT_DIR / ".env")
+        load_dotenv(PARSE_HUB_BOT_DIR / ".env")
+    except Exception:
+        pass
+
+    # 3) Telegram 占位配置：原项目 BotSettings 的必填项；未配置真实凭据时用于跳过校验（TG Bot 不启动）
     for key, value in (("BOT_TOKEN", "0:0"), ("API_ID", "1"), ("API_HASH", "forwarder")):
         os.environ.setdefault(key, value)
 
-    # 3) 下载临时目录 → forwarder_data/downloads
+    # 4) 下载临时目录 → forwarder_data/downloads
     os.environ.setdefault("DOWNLOAD_DIR", str(FORWARDER_DATA_DIR / "downloads"))
 
-    # 4) 模块搜索路径：原项目优先，其次仓库根目录（forwarder 包）
+    # 5) 模块搜索路径：原项目优先，其次仓库根目录（forwarder 包）
     sys.path.insert(0, str(PARSE_HUB_BOT_DIR))
     sys.path.insert(0, str(ROOT_DIR))
 

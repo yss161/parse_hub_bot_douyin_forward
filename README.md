@@ -17,6 +17,10 @@
                                              │  ③ 交给 parse_hub_bot 解析
                                              ▼
                                    解析 → 下载 → 归档到 output/
+                                             │
+                                             │  ④（可选）推送到指定 TG 群组/频道
+                                             ▼
+                                   Telegram 频道 / 群组
                                   （解析部分 = 原项目实现，零改动）
 ```
 
@@ -32,6 +36,7 @@
 | 抖音 Web 接收端（小号收私信） | 本项目 `forwarder/douyin_web.py` | 新增 |
 | 桥接与归档 | 本项目 `forwarder/parser_bridge.py`、`archive.py` | 新增 |
 | 服务入口 | 本项目 `run.py`、`forwarder/main.py` | 新增 |
+| Telegram 推送（可选） | 复用原项目构建逻辑（`build_caption` / `build_input_media`） | 新增 `forwarder/tg_push.py`，pyrogram 直连发送 |
 
 原项目以 **git 子模块**引入（固定在某个上游提交上，一行代码未改），可通过以下命令验证：
 
@@ -57,6 +62,7 @@ douyin_download_bot/
 │   ├── archive.py               #   归档（复制媒体 + metadata.json）
 │   ├── state.py                 #   去重/水位状态
 │   ├── reporter.py              #   日志版状态报告器
+│   ├── tg_push.py               #   Telegram 推送（可选，TG_PUSH=true 启用）
 │   └── main.py                  #   服务主循环
 ├── run.py                       # 统一入口
 ├── requirements-forwarder.txt   # 依赖清单
@@ -189,7 +195,9 @@ python run.py test-url "https://v.douyin.com/xxxxxxx/"
 | `FORWARDER_PARSE_MIN_INTERVAL` | `8` | 两次解析之间的最小间隔（秒），防频繁请求 |
 | `FORWARDER_OUTPUT_DIR` | `./output` | 归档目录 |
 | `DOUYIN_PROCESS_HISTORY` | `false` | 首次运行是否处理历史转发 |
-| `FORWARDER_SKIP_MEDIA_PROCESSING` | `true` | 跳过原项目的 TG 媒体处理，归档原始文件 |
+| `FORWARDER_SKIP_MEDIA_PROCESSING` | `true` | 跳过原项目的媒体处理（转码等），归档原始文件；设 `false` 需装 ffmpeg |
+| `TG_PUSH` | `false` | 是否推送解析结果到 Telegram 群组/频道（见下文专节） |
+| `TG_TARGET_CHAT` | 空 | 推送目标：`@用户名`／`-100...` 数字 ID／t.me 链接 |
 | `DOUYIN_HEADLESS` | `true` | 无头模式；本机调试可设 `false` 观察浏览器 |
 | `FORWARDER_DUMP_HTML` | `false` | 提取失败时转储页面 HTML 到 `forwarder_data/debug/`（调选择器用） |
 
@@ -211,6 +219,49 @@ platforms:
 
 > 说明：接收端（小号登录、收私信）与解析端（parsehub 拉取视频信息）是两条独立的通道；
 > 解析端不配置 Cookie 通常也能解析公开视频，配置后更稳。
+
+---
+
+## 推送到 Telegram 群组/频道（可选）
+
+希望解析完成后自动把视频发送到你的 Telegram 群组/频道（而不是只存服务器本地）时，按以下步骤配置：
+
+### 1. 申请 Telegram 凭据
+
+1. 打开 <https://my.telegram.org>（浏览器需能访问 Telegram），用你的 TG 账号登录 → **API development tools** → 创建应用 → 记下 `API_ID`、`API_HASH`；
+2. 在 Telegram 里打开 **@BotFather** → 发送 `/newbot` 按提示创建机器人 → 记下 `BOT_TOKEN`。
+
+### 2. 把机器人加入目标群组/频道
+
+- **频道**：频道 → 管理 → 管理员 → 添加你的机器人（勾选「发布消息」权限）；
+- **群组**：直接把机器人拉进群（如群组限制发言，给机器人管理员权限）。
+
+### 3. 配置 .env
+
+```ini
+TG_PUSH=true
+TG_TARGET_CHAT=@你的频道用户名       # 私有频道/群用 -100 开头的数字ID，也支持 t.me 链接
+API_ID=1234567
+API_HASH=xxxxxxxxxxxxxxxxxxxxxxxx
+BOT_TOKEN=123456789:AAxxxxxxxxxxxxxx
+```
+
+> 私有频道/群的数字 ID 获取：把频道/群里任意一条消息**转发给 @userinfobot**（或 @RawDataBot），返回里的 `Forwarded from ... id: -100xxxx` 即为所需 ID。
+
+### 4. 重启服务并验证
+
+```bash
+sudo systemctl restart douyin-forward
+journalctl -u douyin-forward -f
+```
+
+日志出现 `TG 推送已就绪 ✅ 目标: xxx` 即配置成功；之后每次解析完成会多出一行 `已推送至 Telegram`。
+
+**说明**：
+
+- 推送内容与原项目输出一致（视频带封面、流式播放 + 标题/来源文案；图文走相册；失败自动降级为文档）；
+- 推送失败会自动重试（与解析共用重试机制，最多 3 次），只影响推送，本地归档不受影响；
+- 服务器需要能访问 Telegram：海外服务器一般直连可用；**国内服务器请配置 `BOT_PROXY`**（如 `BOT_PROXY=http://127.0.0.1:7890`）。
 
 ---
 
@@ -274,6 +325,15 @@ sudo APP_USER=douyin bash deploy/install_ubuntu.sh
 
 **Q9. 为什么依赖清单里没有 tgcrypto？**
 原项目将其列为依赖，但 tgcrypto 仅用于 Telegram 连接的原生加密加速（可选），且对新版 Python 无预编译轮子、无编译链时会安装失败。本服务不启动 Telegram Bot，运行时用不到，故省略；如你同时还要跑原项目的 TG Bot，可单独 `pip install tgcrypto`。
+
+**Q10. 需要配置原项目的 Telegram Bot 吗（API_ID / API_HASH / BOT_TOKEN）？**
+**不需要**（除非你要用「推送到 Telegram 群组/频道」功能）。本服务只复用原项目的「解析引擎」（`services.ParseService` / `services.ParsePipeline` + parsehub 库），
+Telegram 机器人部分不会被启动——`run.py` 启动时会自动注入占位配置，与 Telegram 完全无关。
+日志里出现 `未找到 platform_config.yaml, 跳过加载` 也属正常（那是**可选**的平台 Cookie / 代理配置，不配置也能解析）。
+只有当你启用 **TG 推送**或想**另外**运行原项目的完整 TG Bot 时，才需要去 my.telegram.org 申请 API_ID / API_HASH，并向 @BotFather 申请 BOT_TOKEN。
+
+**Q11. 国内服务器连不上 Telegram / 推送超时？**
+Telegram 在境内不可直连。搭好代理后（如本机 7890 端口），在 `.env` 中配置 `BOT_PROXY=http://127.0.0.1:7890`（支持 socks5:// 等），重启服务即可。海外服务器一般无需代理。
 
 ---
 

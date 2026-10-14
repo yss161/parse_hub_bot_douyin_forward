@@ -19,6 +19,9 @@
 | 端口 | **无需开放任何入站端口**（服务只做出站请求） |
 | 账号 | 建议使用专门的**小号**，并与大号互相关注 |
 
+> 💡 无需配置 Telegram 相关（`API_ID` / `API_HASH` / `BOT_TOKEN`）：本服务只复用原项目的解析引擎，
+> TG 机器人部分不会启动（`run.py` 启动时自动注入占位配置）。日志里 `未找到 platform_config.yaml, 跳过加载` 也属正常。
+
 ### 部署前连通性检查（可选，1 分钟）
 
 ```bash
@@ -198,7 +201,29 @@ sudo systemctl status douyin-forward       # 状态
 
 ---
 
-## 6. 日常运维
+## 6. 推送到 Telegram 群组/频道（可选）
+
+希望解析完成后自动把视频发送到你的 Telegram 群组/频道：
+
+1. 按 README「推送到 Telegram 群组/频道」章节申请 `API_ID` / `API_HASH`（my.telegram.org）与 `BOT_TOKEN`（@BotFather），并把机器人加入目标群组/频道（频道需设为管理员并有发帖权限）；
+2. 编辑 `/opt/douyin_download_bot/.env`：
+
+   ```ini
+   TG_PUSH=true
+   TG_TARGET_CHAT=@你的频道用户名      # 或 -100 开头的数字ID
+   API_ID=1234567
+   API_HASH=xxxxxxxxxxxxxxxx
+   BOT_TOKEN=123456789:AAxxxxxxxx
+   ```
+
+3. 重启服务：`sudo systemctl restart douyin-forward`，日志出现 `TG 推送已就绪 ✅ 目标: ...` 即成功。
+
+> - 服务器需能访问 Telegram：海外服务器一般直连可用；**国内服务器请配置 `BOT_PROXY=http://127.0.0.1:7890`**；
+> - 如需与原项目完全一致的媒体处理（转码/长图切割等），设置 `FORWARDER_SKIP_MEDIA_PROCESSING=false` 并安装 ffmpeg（`apt-get install -y ffmpeg`）。
+
+---
+
+## 7. 日常运维
 
 | 操作 | 命令 |
 | --- | --- |
@@ -221,7 +246,7 @@ sudo systemctl status douyin-forward       # 状态
 
 ---
 
-## 7. 故障排查
+## 8. 故障排查
 
 | 现象 | 处理 |
 | --- | --- |
@@ -238,7 +263,7 @@ sudo systemctl status douyin-forward       # 状态
 
 ---
 
-## 8. 安全与合规
+## 9. 安全与合规
 
 - 服务只发出请求，无需开放任何入站端口，**请不要**将调试端口暴露到公网；
 - 服务以普通用户（默认 `douyin`）运行，项目目录归属该用户，遵循最小权限；

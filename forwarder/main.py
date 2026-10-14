@@ -5,8 +5,8 @@
     【大号】在手机上把视频转发给【小号】
         → 服务器上的小号（抖音网页版，Playwright）收到私信
         → 本模块轮询识别新消息并提取视频链接
-        → parser_bridge 调用原项目解析链路（解析 → 下载 → 归档）
-        → 结果落盘到 output/ 目录
+        → parser_bridge 调用原项目解析链路（解析 → 下载 → 归档到 output/）
+        → （可选）tg_push 把结果推送到指定 Telegram 群组/频道（TG_PUSH=true）
 
 用法（统一从仓库根目录执行）：
     python run.py serve            # 启动常驻服务
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from typing import Any
 
 from log import logger
 
@@ -27,6 +28,7 @@ from .douyin_web import DouyinWebReceiver
 from .parser_bridge import parse_url
 from .reporter import LogStatusReporter
 from .state import StateStore, fingerprint
+from .tg_push import TgPusher
 
 logger = logger.bind(name="Forwarder/Main")
 
@@ -52,8 +54,11 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
     state = StateStore(settings.state_file)
     receiver = DouyinWebReceiver(settings, state)
     reporter = LogStatusReporter("Pipeline")
+    pusher = TgPusher(settings)
 
     await receiver.start()
+    if settings.tg_push:
+        await pusher.start()
     if once:
         logger.info("启动完成（--once：只执行一轮轮询）")
 
@@ -78,6 +83,9 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
                 if wait > 0:
                     await asyncio.sleep(wait)
 
+                async def push_cb(result: Any) -> bool:
+                    return await pusher.push(result.parse_result, result.processed_list)
+
                 logger.info(f"开始解析（来源: {cand.source}）: {cand.url}")
                 outcome = await parse_url(
                     cand.url,
@@ -85,10 +93,12 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
                     save_metadata=settings.save_metadata,
                     skip_media_processing=settings.skip_media_processing,
                     reporter=reporter,
+                    on_files_ready=push_cb if pusher.enabled else None,
                 )
                 last_parse_ts = time.monotonic()
 
-                if outcome.ok and outcome.archive is not None:
+                push_failed = outcome.ok and outcome.push_ok is False
+                if outcome.ok and outcome.archive is not None and not push_failed:
                     state.mark_processed(fp, cand.url, str(outcome.archive.dir))
                     if outcome.raw_url and outcome.raw_url != cand.url:
                         state.mark_processed(
@@ -98,18 +108,24 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
                     logger.success(
                         f"解析完成 ✅ 已归档: {outcome.archive.dir} "
                         f"（{len(outcome.archive.files)} 个文件）"
+                        + ("，已推送至 Telegram" if outcome.push_ok else "")
                     )
                 else:
-                    attempts = state.record_failure(fp, outcome.error or "未知错误")
+                    error = (
+                        "解析与归档成功，但 Telegram 推送失败（下一轮自动重试）"
+                        if push_failed
+                        else (outcome.error or "未知错误")
+                    )
+                    attempts = state.record_failure(fp, error)
                     if attempts >= MAX_PARSE_ATTEMPTS:
-                        state.mark_gave_up(fp, cand.url, outcome.error or "未知错误")
-                        logger.error(f"已失败 {attempts} 次，放弃: {cand.url} —— {outcome.error}")
+                        state.mark_gave_up(fp, cand.url, error)
+                        logger.error(f"已失败 {attempts} 次，放弃: {cand.url} —— {error}")
                     else:
                         # 撤销消息的"已识别"标记，下一轮重新提取并重试
                         state.unmark_seen_message(cand.msg_fp)
                         logger.warning(
-                            f"解析失败（第 {attempts}/{MAX_PARSE_ATTEMPTS} 次，稍后自动重试）: "
-                            f"{cand.url} —— {outcome.error}"
+                            f"处理失败（第 {attempts}/{MAX_PARSE_ATTEMPTS} 次，稍后自动重试）: "
+                            f"{cand.url} —— {error}"
                         )
 
                 state.save()
@@ -123,6 +139,7 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
             logger.debug(f"本轮结束（耗时 {elapsed:.1f}s），{wait:.0f}s 后进入下一轮")
             await asyncio.sleep(wait)
     finally:
+        await pusher.stop()
         await receiver.close()
         logger.info("服务已停止")
 

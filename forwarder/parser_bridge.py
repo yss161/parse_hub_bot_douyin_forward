@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,8 @@ class ParseOutcome:
     title: str = ""
     parse_result: AnyParseResult | None = None
     archive: ArchiveResult | None = None
+    # 推送结果：None=未启用推送；True=推送成功；False=推送失败（解析与归档本身成功）
+    push_ok: bool | None = None
 
 
 def _default_locale_selector():
@@ -65,12 +68,15 @@ async def parse_url(
     skip_media_processing: bool = True,
     reporter: LogStatusReporter | None = None,
     download: bool = True,
+    on_files_ready: Callable[[Any], Awaitable[bool | None]] | None = None,
 ) -> ParseOutcome:
     """用原项目的解析链路处理一个链接。
 
     :param url: 待解析链接（私信里提取到的，可能是短链）
     :param output_dir: 归档输出目录
     :param download: False 时只解析（不下载、不归档），用于快速验证解析是否可用
+    :param on_files_ready: 可选回调——归档完成后、临时文件清理前调用（传入流水线结果），
+        用于可选的 Telegram 推送等后续动作；返回 False 表示后续动作失败
     """
     reporter = reporter or LogStatusReporter()
     ps = ParseService()
@@ -131,6 +137,15 @@ async def parse_url(
                 save_metadata=save_metadata,
             )
             outcome.ok = True
+
+            # 可选：归档完成后的后续动作（此刻归档文件与临时文件都有效，供推送使用）
+            if on_files_ready is not None:
+                try:
+                    outcome.push_ok = bool(await on_files_ready(result))
+                except Exception as e:
+                    logger.error(f"归档后回调异常: {e}")
+                    outcome.push_ok = False
+
             return outcome
     except Exception as e:
         logger.opt(exception=e).error(f"解析流水线异常: {url}")
