@@ -368,6 +368,93 @@ class DouyinWebReceiver:
         except Exception:
             pass
 
+    async def _has_identity_verification(self) -> bool:
+        """检测抖音「身份验证」页面（异地登录时的二次验证：短信码/密码）。"""
+        page = self._page
+        if page is None:
+            return False
+        try:
+            for text in ("为保障账号安全，请先完成身份验证", "接收短信验证码"):
+                if await page.locator(f"text={text}").count() > 0:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    async def _try_agent_cmd(self) -> bool:
+        """执行「远程协助」指令文件（forwarder_data/agent_cmd.txt）。
+
+        用于人工介入未知页面（如「身份验证」）：把要做的操作写入该文件（UTF-8，每行一条），
+        本方法在登录等待期间每 3 秒检查一次，执行后自动删除文件。
+        支持指令：
+            click_text 接收短信验证码     # 按文本点击元素
+            fill 123456                   # 向页面第一个可见输入框输入内容
+            type 123456                   # 向当前焦点输入
+            press Enter
+            click 720 459                 # 按视口坐标点击（与 login_page_state.png 像素一致）
+            drag 300 400 800 400          # 按住拖动（滑块等）
+            wait 2                        # 等待秒数
+        """
+        page = self._page
+        if page is None:
+            return False
+        cmd_file = self.settings.data_dir / "agent_cmd.txt"
+        if not cmd_file.exists():
+            return False
+        try:
+            lines = [ln.strip() for ln in cmd_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        except Exception:
+            lines = []
+        try:
+            cmd_file.unlink()
+        except Exception:
+            pass
+
+        executed = False
+        for line in lines:
+            try:
+                op, _, arg = line.partition(" ")
+                op, arg = op.strip().lower(), arg.strip()
+                if op == "click_text":
+                    await page.locator(f"text={arg}").first.click(timeout=5000)
+                elif op == "fill":
+                    target = None
+                    for el in await page.query_selector_all("input"):
+                        try:
+                            if await el.is_visible():
+                                target = el
+                                break
+                        except Exception:
+                            continue
+                    if target is None:
+                        raise RuntimeError("页面上没有可见的输入框")
+                    await target.click()
+                    await page.keyboard.type(arg, delay=60)
+                elif op == "type":
+                    await page.keyboard.type(arg, delay=60)
+                elif op == "press":
+                    await page.keyboard.press(arg or "Enter")
+                elif op == "click":
+                    x, y = (float(v) for v in arg.split()[:2])
+                    await page.mouse.click(x, y)
+                elif op == "drag":
+                    x1, y1, x2, y2 = (float(v) for v in arg.split()[:4])
+                    await page.mouse.move(x1, y1)
+                    await page.mouse.down()
+                    for i in range(1, 11):
+                        await page.mouse.move(x1 + (x2 - x1) * i / 10, y1 + (y2 - y1) * i / 10)
+                        await asyncio.sleep(0.03)
+                    await page.mouse.up()
+                elif op == "wait":
+                    await asyncio.sleep(float(arg or "1"))
+                else:
+                    raise RuntimeError(f"未知指令: {op}")
+                executed = True
+                logger.info(f"远程协助指令已执行: {line}")
+            except Exception as e:
+                logger.warning(f"远程协助指令执行失败: {line} -> {e}")
+        return executed
+
     async def _login_flow(self) -> None:
         page = self._page
         assert page is not None
@@ -413,13 +500,28 @@ class DouyinWebReceiver:
         # 等待扫码（期间定期重新截取二维码，应对二维码过期刷新）
         deadline = time.monotonic() + self.settings.qr_timeout
         last_refresh = time.monotonic()
+        idv_warned = False
         while time.monotonic() < deadline:
             if await self._is_logged_in():
                 await self._save_storage_state()
                 return
 
-            # 扫码后若出现安全验证（滑块等），无头环境无法完成——留存截图并明确报错
-            if await self._is_captcha_present():
+            # 远程协助：执行 agent_cmd.txt 中的指令（人工介入未知页面用，执行后自动删除）
+            if await self._try_agent_cmd():
+                await self._snapshot_login_page()
+
+            # 抖音风控的「身份验证」页面（异地登录常见）：提示等待人工介入，不作为验证码拦截处理
+            if await self._has_identity_verification():
+                if not idv_warned:
+                    idv_warned = True
+                    logger.warning(
+                        "检测到「身份验证」页面（抖音风控要求二次验证，异地登录常见）。\n"
+                        f"  查看当前页面截图: {self.settings.data_dir / 'login_page_state.png'}\n"
+                        f"  远程协助: 在 {self.settings.data_dir / 'agent_cmd.txt'} 写入指令（UTF-8，每行一条，执行后自动删除）\n"
+                        "  指令: click_text 文本 / fill 内容 / type 内容 / press Enter / click x y / drag x1 y1 x2 y2 / wait 秒"
+                    )
+            # 其他安全验证（滑块等），无头环境无法完成——留存截图并明确报错
+            elif await self._is_captcha_present():
                 await self._snapshot_login_page()
                 raise RuntimeError(
                     "扫码后在浏览器端出现了安全验证页面（滑块等），当前无头环境无法自动完成。\n"
