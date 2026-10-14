@@ -741,6 +741,7 @@ class DouyinWebReceiver:
         results: list[IncomingCandidate] = []
         clicks = 0
         cycle_fps: set[str] = set()
+        cycle_urls: set[str] = set()
 
         for item in reversed(items):  # DOM 中新消息在后，倒序处理
             try:
@@ -758,8 +759,10 @@ class DouyinWebReceiver:
                 if links:
                     url = links[0]
                     self.state.mark_seen_message(fp)
-                    results.append(IncomingCandidate(url=url, source="text", msg_fp=fp))
-                    logger.info(f"发现转发链接: {url}")
+                    if url not in cycle_urls:
+                        cycle_urls.add(url)
+                        results.append(IncomingCandidate(url=url, source="text", msg_fp=fp))
+                        logger.info(f"发现转发链接: {url}")
                     continue
 
                 # 无链接但像视频卡片 → 点击提取
@@ -768,8 +771,10 @@ class DouyinWebReceiver:
                     url, completed = await self._click_extract(item)
                     if url:
                         self.state.mark_seen_message(fp)
-                        results.append(IncomingCandidate(url=url, source="card", msg_fp=fp))
-                        logger.info(f"从视频卡片提取到链接: {url}")
+                        if url not in cycle_urls:
+                            cycle_urls.add(url)
+                            results.append(IncomingCandidate(url=url, source="card", msg_fp=fp))
+                            logger.info(f"从视频卡片提取到链接: {url}")
                     elif completed:
                         # 点击流程正常，但这张卡片没有可解析的视频 —— 不再重复尝试
                         self.state.mark_seen_message(fp)
@@ -802,7 +807,7 @@ class DouyinWebReceiver:
         return [i for i in items if i is not None]
 
     async def _is_others(self, item: ElementHandle, container: ElementHandle | None) -> bool:
-        """判断消息是否为"对方（大号）"发出。类名提示 → 几何位置 → 默认视为对方。"""
+        """判断消息是否为"对方（大号）"发出。类名提示 → 气泡几何位置 → 默认视为对方。"""
         try:
             cls = (await item.get_attribute("class") or "").lower()
             for hint in SELF_CLASS_HINTS:
@@ -811,12 +816,24 @@ class DouyinWebReceiver:
         except Exception:
             pass
 
-        # 几何位置：自己发的消息在右半边
+        # 几何位置：以消息"气泡"（activeClickArea / MessageItem* 内容容器）的中心判断左右。
+        # 注意：消息最外层（messageMessageBox）是全宽的"行"，其中点与列表中点重合，不能用它判断。
+        probe = None
+        for sel in ("[class*='activeClickArea']", "[class*='MessageItem']"):
+            try:
+                probe = await item.query_selector(sel)
+                if probe is not None:
+                    break
+            except Exception:
+                continue
+        target = probe or item
         try:
-            box = await item.bounding_box()
+            box = await target.bounding_box()
             cbox = await (container.bounding_box() if container is not None else None)
             if box and cbox and cbox["width"] > 0:
-                return (box["x"] + box["width"] / 2) < (cbox["x"] + cbox["width"] / 2)
+                left_gap = box["x"] - cbox["x"]
+                right_gap = (cbox["x"] + cbox["width"]) - (box["x"] + box["width"])
+                return left_gap <= right_gap
         except Exception:
             pass
 
@@ -833,8 +850,12 @@ class DouyinWebReceiver:
         found: list[str] = []
         for pattern in LINK_PATTERNS:
             for m in pattern.finditer(text):
-                url = m.group(0).rstrip("。，,;；)）]】\"'")
-                if url not in found:
+                url = m.group(0)
+                # 处理 JSON 转义残留：\u0026 -> &，以及尾部反斜杠/标点
+                url = re.sub(r"\\u([0-9a-fA-F]{4})", lambda x: chr(int(x.group(1), 16)), url)
+                url = html_lib.unescape(url)
+                url = url.rstrip("。，,;；)）]】\"'\\&")
+                if url and url not in found:
                     found.append(url)
         return found
 
