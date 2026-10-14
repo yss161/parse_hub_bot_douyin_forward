@@ -19,6 +19,17 @@
 | 端口 | **无需开放任何入站端口**（服务只做出站请求） |
 | 账号 | 建议使用专门的**小号**，并与大号互相关注 |
 
+### 部署前连通性检查（可选，1 分钟）
+
+```bash
+# 正确的检查方式：GET 请求（返回 200 即正常）
+curl -s -L -o /dev/null -w "HTTP %{http_code} -> %{url_effective}\n" --max-time 10 https://www.douyin.com
+# 预期输出：HTTP 200 -> https://www.douyin.com/
+```
+
+> ⚠️ 不要用 `curl -I`（HEAD 请求）检查：抖音 CDN 对 HEAD 请求一律返回 `404`，
+> 那是**正常现象**（能收到 404 响应就说明 TLS / HTTP2 连接已经建立），不代表网络不通。
+
 ---
 
 ## 1. 获取项目到服务器
