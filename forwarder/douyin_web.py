@@ -405,7 +405,7 @@ class DouyinWebReceiver:
             + "\n  请用【小号】的抖音 App 扫码登录"
             + f"\n  二维码截图: {qr_path}"
             + "\n  （在服务器上可用 scp / 面板文件管理下载后扫码；"
-            + "\n    二维码约 1 分钟过期、截图每 45 秒自动刷新——【每次扫之前请重新下载最新图】，重复扫旧图会因过期而无效；"
+            + "\n    二维码约 1 分钟过期、截图每 25 秒自动刷新——【每次扫之前请重新下载最新图】，重复扫旧图会因过期而无效；"
             + f"\n    {self.settings.qr_timeout}s 内未扫码将超时）"
             + "\n" + "=" * 64
         )
@@ -428,10 +428,11 @@ class DouyinWebReceiver:
                     "2) 或更换服务器网络环境后重试（抖音风控与访问 IP 强相关）。"
                 )
 
-            if time.monotonic() - last_refresh > 45:
+            if time.monotonic() - last_refresh > 25:
                 last_refresh = time.monotonic()
-                await self._capture_qr(qr_path)
+                got_qr = await self._capture_qr(qr_path)
                 await self._snapshot_login_page()
+                logger.info(f"等待扫码中（页面: {page.url}，二维码刷新: {'成功' if got_qr else '失败'}）")
             await asyncio.sleep(3)
 
         raise TimeoutError(
