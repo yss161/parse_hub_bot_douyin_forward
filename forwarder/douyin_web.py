@@ -257,16 +257,17 @@ class DouyinWebReceiver:
     # ────────────── 风控检测与处理 ──────────────
 
     async def _is_captcha_present(self) -> bool:
-        """检测是否被风控到「验证码中间页」（滑块拼图）。"""
+        """检测是否被风控到验证页面（「验证码中间页」滑块、扫码后的安全验证等）。"""
         page = self._page
         if page is None:
             return False
         try:
             title = await page.title()
-            if "验证码" in title:
+            if "验证" in title:
                 return True
-            if await page.locator("text=按住左按钮拖动完成上方拼图").count() > 0:
-                return True
+            for text in ("按住左按钮拖动完成上方拼图", "拖动滑块", "完成拼图", "请完成安全验证"):
+                if await page.locator(f"text={text}").count() > 0:
+                    return True
         except Exception:
             pass
         return False
@@ -355,6 +356,18 @@ class DouyinWebReceiver:
                 continue
         return False
 
+    async def _snapshot_login_page(self) -> None:
+        """保存登录页面整页截图（排查扫码不生效 / 风控拦截时用）。"""
+        page = self._page
+        if page is None:
+            return
+        try:
+            path = self.settings.data_dir / "login_page_state.png"
+            await page.screenshot(path=str(path))
+            logger.debug(f"登录页面快照已更新: {path}（页面地址: {page.url}）")
+        except Exception:
+            pass
+
     async def _login_flow(self) -> None:
         page = self._page
         assert page is not None
@@ -392,7 +405,7 @@ class DouyinWebReceiver:
             + "\n  请用【小号】的抖音 App 扫码登录"
             + f"\n  二维码截图: {qr_path}"
             + "\n  （在服务器上可用 scp / 面板文件管理下载后扫码；"
-            + f"\n    二维码约 1 分钟过期并自动刷新，本脚本会定期更新截图；"
+            + "\n    二维码约 1 分钟过期、截图每 45 秒自动刷新——【每次扫之前请重新下载最新图】，重复扫旧图会因过期而无效；"
             + f"\n    {self.settings.qr_timeout}s 内未扫码将超时）"
             + "\n" + "=" * 64
         )
@@ -404,9 +417,21 @@ class DouyinWebReceiver:
             if await self._is_logged_in():
                 await self._save_storage_state()
                 return
+
+            # 扫码后若出现安全验证（滑块等），无头环境无法完成——留存截图并明确报错
+            if await self._is_captcha_present():
+                await self._snapshot_login_page()
+                raise RuntimeError(
+                    "扫码后在浏览器端出现了安全验证页面（滑块等），当前无头环境无法自动完成。\n"
+                    f"页面截图已保存: {self.settings.data_dir / 'login_page_state.png'}（可下载查看）\n"
+                    "建议: 1) 给服务器加装 VNC（x11vnc）后按部署文档第 4 节方式③用有界面方式登录；"
+                    "2) 或更换服务器网络环境后重试（抖音风控与访问 IP 强相关）。"
+                )
+
             if time.monotonic() - last_refresh > 45:
                 last_refresh = time.monotonic()
                 await self._capture_qr(qr_path)
+                await self._snapshot_login_page()
             await asyncio.sleep(3)
 
         raise TimeoutError(
