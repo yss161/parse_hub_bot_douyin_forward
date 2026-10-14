@@ -3,6 +3,9 @@ forwarder_data/
 output/
 .env
 
+# 登录态导出包（含账号凭证，禁止提交/分享）
+browser_profile*.zip
+
 # 工作目录（本机工具数据，不随仓库发布）
 .workbuddy/
 
