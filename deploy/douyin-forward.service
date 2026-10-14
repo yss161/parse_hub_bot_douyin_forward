@@ -1,0 +1,34 @@
+# ============================================================
+# 抖音转发解析服务 —— systemd 服务模板
+#
+# 本文件由 deploy/install_ubuntu.sh 自动替换占位符并安装到
+# /etc/systemd/system/douyin-forward.service
+#
+# 如手动安装：将 __APP_USER__ / __PROJECT_DIR__ / __APP_HOME__ 替换为实际值。
+# ============================================================
+
+[Unit]
+Description=Douyin Forward Parse Service (parse_hub_bot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__APP_USER__
+WorkingDirectory=__PROJECT_DIR__
+ExecStart=__PROJECT_DIR__/.venv/bin/python run.py serve
+Restart=always
+RestartSec=10
+
+Environment=PYTHONUNBUFFERED=1
+Environment=HOME=__APP_HOME__
+
+# 如服务器上无头模式（默认）被抖音风控拦截（验证码中间页），
+# 可改用 xvfb 有界面模式运行服务（并在 .env 中设置 DOUYIN_HEADLESS=false）：
+# ExecStart=/usr/bin/xvfb-run -a __PROJECT_DIR__/.venv/bin/python run.py serve
+
+# StandardOutput=journal
+# StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,45 @@
+# ============================================================
+# 转发链路服务依赖
+#
+# 上半部分：parse_hub_bot（原项目）运行所需依赖，
+#           与 parse_hub_bot/pyproject.toml 的 dependencies 保持一致，
+#           版本跟随原项目 uv.lock（parsehub 2.3.5）。
+# 下半部分：转发链路新增依赖（Playwright）。
+#
+# 安装：
+#   pip install -r requirements-forwarder.txt
+#   playwright install chromium
+# ============================================================
+
+# ---- parse_hub_bot 原项目依赖（勿单独升级，跟随原项目） ----
+aiosqlite>=0.22.1
+alembic>=1.18.5
+easy-ai18n>=1.2.1
+haishoku>=1.1.8
+httpx[socks]>=0.28.1
+kurigram>=2.2.24
+loguru>=0.6.0
+lxml-html-clean>=0.4.1
+markdown>=3.7
+parsehub>=2.3.5
+pillow>=12.1.1
+pillow-heif>=1.1.1
+pydantic>=2.12.5
+pydantic-settings>=2.11.0
+python-dotenv>=1.0.1
+pyyaml>=6.0.3
+sqlalchemy[asyncio]>=2.0.51,<2.1
+telegraph>=2.2.0
+uvloop>=0.22.1 ; sys_platform != "win32"
+winloop>=0.3.1 ; sys_platform == "win32"
+
+# ---- 说明：tgcrypto（原项目列为依赖）此处刻意不装 ----
+# tgcrypto 只有 C 源码包（Python 3.12+ 无预编译轮子），无编译链时会安装失败；
+# 它仅用于 Telegram 连接的原生加密加速（kurigram 的 "fast" extra，可选），
+# 本服务不启动 Telegram Bot，运行时用不到；如确需安装：
+#   pip install tgcrypto
+# 原项目 pyproject 中的 "tgcrypto>=1.2.5" 对应此项，此处省略不影响解析功能。
+
+# ---- 转发链路新增依赖 ----
+playwright>=1.40
+

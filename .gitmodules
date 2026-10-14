@@ -1,0 +1,4 @@
+[submodule "parse_hub_bot"]
+	path = parse_hub_bot
+	url = https://github.com/z-mio/parse_hub_bot.git
+	branch = main

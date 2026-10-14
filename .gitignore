@@ -1,0 +1,16 @@
+# 转发链路服务运行数据
+forwarder_data/
+output/
+.env
+
+# 工作目录（本机工具数据，不随仓库发布）
+.workbuddy/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+
+# Playwright
+.playwright/

@@ -1,0 +1,2 @@
+# 统一使用 LF 换行（部署目标为 Linux 服务器；Windows 下 Python/Markdown/脚本均兼容 LF）
+* text=auto eol=lf
