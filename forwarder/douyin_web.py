@@ -126,6 +126,9 @@ MESSAGE_ITEM_SELECTORS = [
 # 判定"自己的消息"的类名提示（命中则视为小号自己发出，跳过）
 SELF_CLASS_HINTS = ("self", "mine", "is-me", "isme", "right")
 
+# 私信消息接口数据中，视频分享卡片的视频 ID 字段（实测 2026-10）
+MESSAGE_ITEM_ID_RE = re.compile(r'"itemId"\s*:\s*"(\d{15,})"')
+
 # 登录态 cookie 名称
 SESSION_COOKIE_NAMES = {"sessionid", "sid_guard", "sid_tt", "sid_ucp_virtual"}
 
@@ -153,6 +156,8 @@ class DouyinWebReceiver:
         self._context: BrowserContext | None = None
         self._page: Page | None = None
         self._current_conv_text: str | None = None
+        # 已捕获的私信消息接口数据（时间戳, 文本），用于准确提取视频卡片 ID
+        self._msg_payloads: list[tuple[float, str]] = []
 
     # ══════════════════════ 生命周期 ══════════════════════
 
@@ -210,7 +215,71 @@ class DouyinWebReceiver:
         await self._context.add_init_script(STEALTH_SCRIPT)
         self._page = self._context.pages[0] if self._context.pages else await self._context.new_page()
         self._page.set_default_timeout(20000)
+        # 拦截私信消息接口（准确提取视频卡片的 itemId，见 _capture_message_payload）
+        self._page.on("response", self._on_response)
         logger.info(f"浏览器已启动（profile: {self.settings.browser_profile_dir}, headless={self.settings.headless}）")
+
+    # ────────────── 私信消息接口拦截 ──────────────
+
+    def _on_response(self, response: Any) -> None:
+        """同步回调：命中消息接口时异步读取响应体。"""
+        try:
+            if "imapi.douyin.com/v1/message/" in response.url:
+                asyncio.ensure_future(self._capture_message_payload(response))
+        except Exception:
+            pass
+
+    async def _capture_message_payload(self, response: Any) -> None:
+        """捕获消息接口响应（含分享卡片的 itemId、文本消息原文）。"""
+        try:
+            body = await response.body()
+            text = body.decode("utf-8", errors="ignore")
+        except Exception:
+            return
+        if not text:
+            return
+        self._msg_payloads.append((time.monotonic(), text))
+        # 只保留最近 5 分钟、最多 10 条
+        cutoff = time.monotonic() - 300
+        self._msg_payloads = [p for p in self._msg_payloads if p[0] >= cutoff][-10:]
+        logger.debug(f"已捕获消息接口数据: {response.url.split('?')[0]}（{len(text)} 字符）")
+
+    def _collect_payload_candidates(self) -> list[tuple[str, str]]:
+        """从已捕获的接口数据中提取候选：(指纹, 链接)。
+
+        - 分享卡片：itemId -> https://www.douyin.com/video/{itemId}
+        - 文本消息：正文中的抖音链接（正则）
+        """
+        found: dict[str, str] = {}
+        for _ts, text in self._msg_payloads:
+            for m in MESSAGE_ITEM_ID_RE.finditer(text):
+                item_id = m.group(1)
+                found.setdefault(f"aweme:{item_id}", f"https://www.douyin.com/video/{item_id}")
+            for url in self._extract_links(text):
+                found.setdefault(f"url:{url}", url)
+        return list(found.items())
+
+    async def _refresh_for_payload(self) -> bool:
+        """刷新聊天页（触发消息接口重新拉取最新消息）并打开目标会话。
+
+        返回 True 表示本轮捕获到了较新的接口数据。
+        """
+        page = self._page
+        assert page is not None
+        try:
+            await page.reload(wait_until="commit", timeout=45000)
+        except Exception as e:
+            logger.debug(f"刷新私信页失败（继续）: {e}")
+        self._current_conv_text = None
+        await self._human_delay(3.5, 5.0)
+        # 打开目标会话（触发该会话的消息接口）
+        try:
+            await self._open_main_conversation()
+        except Exception:
+            pass
+        await self._human_delay(2.0, 3.0)
+        now = time.monotonic()
+        return any(now - ts <= 30 for ts, _ in self._msg_payloads)
 
     # ══════════════════════ 登录 ══════════════════════
 
@@ -555,7 +624,11 @@ class DouyinWebReceiver:
     # ══════════════════════ 轮询 ══════════════════════
 
     async def poll_once(self) -> list[IncomingCandidate]:
-        """执行一轮轮询，返回新发现的候选链接（已做消息级去重）。"""
+        """执行一轮轮询，返回新发现的候选链接（已做消息级去重）。
+
+        优先使用拦截到的「私信消息接口数据」提取视频卡片 ID（准确、无需点击卡片）；
+        若未捕获到接口数据，则回退到 DOM 扫描。
+        """
         await self._ensure_browser()
         assert self._page is not None and self._context is not None
 
@@ -571,15 +644,28 @@ class DouyinWebReceiver:
 
         await self._ensure_chat_page()
 
-        if not await self._open_main_conversation():
-            logger.warning(
-                "未找到私信会话。请检查：1) 大号是否已给小号发过消息；"
-                "2) DOUYIN_MAIN_ACCOUNT 是否与大号昵称匹配；"
-                "3) 必要时设置 FORWARDER_DUMP_HTML=true 转储页面排查。"
-            )
-            return []
+        # 刷新聊天页以重新拉取消息数据，并打开目标会话
+        payload_ok = await self._refresh_for_payload()
 
-        candidates = await self._scan_messages()
+        if payload_ok:
+            # 接口数据可用：以接口数据为准（视频卡片 itemId + 文本链接）
+            candidates: list[IncomingCandidate] = []
+            for fp, url in self._collect_payload_candidates():
+                if self.state.is_seen_message(fp):
+                    continue
+                self.state.mark_seen_message(fp)
+                candidates.append(IncomingCandidate(url=url, source="api", msg_fp=fp))
+                logger.info(f"从消息数据中发现转发链接: {url}")
+        else:
+            # 回退：DOM 扫描（消息接口未捕获时）
+            if not await self._open_main_conversation():
+                logger.warning(
+                    "未找到私信会话。请检查：1) 大号是否已给小号发过消息；"
+                    "2) DOUYIN_MAIN_ACCOUNT 是否与大号昵称匹配；"
+                    "3) 必要时设置 FORWARDER_DUMP_HTML=true 转储页面排查。"
+                )
+                return []
+            candidates = await self._scan_messages()
 
         # 首次运行：默认仅记录当前消息水位（避免把服务启动前的旧转发全部解析）；
         # 设置 DOUYIN_PROCESS_HISTORY=true 可改为处理历史消息。
