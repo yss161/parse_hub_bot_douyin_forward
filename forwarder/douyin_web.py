@@ -418,14 +418,27 @@ class DouyinWebReceiver:
                 if op == "click_text":
                     await page.locator(f"text={arg}").first.click(timeout=5000)
                 elif op == "fill":
+                    # 优先匹配验证码/密码输入框，避免误填到背景页面的搜索框等
                     target = None
-                    for el in await page.query_selector_all("input"):
-                        try:
-                            if await el.is_visible():
-                                target = el
-                                break
-                        except Exception:
-                            continue
+                    for sel in ("input[placeholder*='验证码']", "input[type='password']", "input[placeholder*='密码']"):
+                        for el in await page.query_selector_all(sel):
+                            try:
+                                if await el.is_visible():
+                                    target = el
+                                    break
+                            except Exception:
+                                continue
+                        if target is not None:
+                            break
+                    if target is None:
+                        # 兜底：取 DOM 中最后一个可见输入框（弹窗一般后置在页面末尾）
+                        for el in reversed(await page.query_selector_all("input")):
+                            try:
+                                if await el.is_visible():
+                                    target = el
+                                    break
+                            except Exception:
+                                continue
                     if target is None:
                         raise RuntimeError("页面上没有可见的输入框")
                     await target.click()
