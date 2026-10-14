@@ -135,9 +135,9 @@ sudo -u douyin -H env DOUYIN_HEADLESS=false \
   /opt/douyin_download_bot/run.py login
 ```
 
-- 二维码会自动截图到 `forwarder_data/login_qr.png`，下载到本地扫码：
+- 二维码会自动截图到 `forwarder_data/login_qr.png`，下载到本地扫码（**用你 ssh 登录服务器的账号**，如 root / ubuntu；`douyin` 是服务用户，通常没有 SSH 权限）：
   ```bash
-  scp douyin@<服务器IP>:/opt/douyin_download_bot/forwarder_data/login_qr.png .
+  scp <登录用户>@<服务器IP>:/opt/douyin_download_bot/forwarder_data/login_qr.png .
   ```
 - 若看到日志出现「验证码中间页」提示 → xvfb 环境无法手动拖滑块，转方案 ②。
 

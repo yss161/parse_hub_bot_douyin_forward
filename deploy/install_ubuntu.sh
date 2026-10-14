@@ -175,7 +175,8 @@ cat <<EOF
      sudo -u $RUN_AS -H env DOUYIN_HEADLESS=false /usr/bin/xvfb-run -a $VENV_DIR/bin/python $PROJECT_DIR/run.py login
      # 二维码会自动截图保存，下载到本地后用【小号】抖音 App 扫码：
      #   $PROJECT_DIR/forwarder_data/login_qr.png
-     #   scp $RUN_AS@<server>:$PROJECT_DIR/forwarder_data/login_qr.png .
+     #   # 在本机执行（<登录用户> = 你 ssh 登录服务器的账号，如 root / ubuntu）：
+     #   scp <登录用户>@<server>:$PROJECT_DIR/forwarder_data/login_qr.png .
 
    ② 若日志提示「验证码中间页」（滑块风控，服务器上无法手动完成）：
      在本地有桌面的电脑（Windows 亦可）执行：
