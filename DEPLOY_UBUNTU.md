@@ -54,7 +54,7 @@ sudo chown -R "$USER":"$USER" /opt/douyin_download_bot    # 归属当前用户�
 
 ```powershell
 cd <本地项目目录>                          # 例如 C:\Users\<你的用户名>\Documents\code\douyin_download_bot
-$skip = @('forwarder_data','output')      # 排除运行数据；如需同步登录态见第 4 节
+$skip = @('forwarder_data','output')      # 排除运行数据（登录态不能跨机器复制，原因见第 4 节）
 $items = Get-ChildItem -Force | Where-Object { $_.Name -notin $skip }
 Compress-Archive -Path $items.FullName -DestinationPath ..\douyin_download_bot.zip -Force
 scp ..\douyin_download_bot.zip ubuntu@<服务器IP>:/tmp/
@@ -138,12 +138,15 @@ sudo systemctl daemon-reload
 
 ## 4. 首次登录（关键步骤）
 
-> 背景：抖音对"无头浏览器 + 全新指纹"会返回「**验证码中间页**」（滑块验证），全新 profile 的无头登录大概率被拦。
-> 因此**首次登录必须让浏览器处于"有界面"状态**。登录成功一次后，profile 变为"可信"，之后无头模式常驻即可（本机实测通过）。
+> 背景：抖音对"无头浏览器 + 全新指纹"会返回「**验证码中间页**」（滑块验证），全新 profile 的无头登录可能被拦。
+> 因此**首次登录建议让浏览器处于"有界面"状态**。登录成功一次后，profile 变为"可信"，之后无头模式常驻即可（本机实测通过）。
 
-### 方案 ①（备选）：服务器上 xvfb 有界面登录
+> ⚠️ **重要：登录态只能在本机（服务器）生成，不能从其它电脑复制！**
+> 浏览器 Cookie 按操作系统绑定加密（Windows 用 DPAPI，绑定当前电脑+用户），跨机器/跨系统复制
+> `browser_profile` 后**无法解密**，登录态会"**静默失效**"（表现为服务日志「未检测到有效登录态」，且没有任何报错提示）。
+> 唯一例外：来源与目标为同一套加密体系（如两台 Linux 且都未启用钥匙串），可以尝试，但不保证成功。
 
-> ⚠️ 需要赶二维码时效（约 1 分钟刷新）且操作期间 SSH 不能断线，新手容易卡壳；操作不顺时请直接用方案 ②。
+### 方式 ①（推荐）：在服务器上完成一次扫码（xvfb）
 
 ```bash
 sudo -u douyin -H env DOUYIN_HEADLESS=false \
@@ -151,32 +154,25 @@ sudo -u douyin -H env DOUYIN_HEADLESS=false \
   /opt/douyin_download_bot/run.py login
 ```
 
-- 二维码会自动截图到 `forwarder_data/login_qr.png`，下载到本地扫码（**用你 ssh 登录服务器的账号**，如 root / ubuntu；`douyin` 是服务用户，通常没有 SSH 权限）：
+- 二维码自动截图到 `forwarder_data/login_qr.png`（约每 45 秒刷新），下载后用【小号】抖音 App 扫码
+  （**用你 ssh 登录服务器的账号**下载，如 root / ubuntu；`douyin` 是服务用户，通常没有 SSH 权限）：
   ```bash
   scp <登录用户>@<服务器IP>:/opt/douyin_download_bot/forwarder_data/login_qr.png .
   ```
-- 若看到日志出现「验证码中间页」提示 → xvfb 环境无法手动拖滑块，转方案 ②。
+- 扫码窗口默认 300 秒；**超时会自动重开新窗口，可以继续扫到成功为止**。想更从容可先调大窗口：
+  ```bash
+  sudo sed -i 's/^DOUYIN_QR_TIMEOUT=.*/DOUYIN_QR_TIMEOUT=900/' /opt/douyin_download_bot/.env
+  grep -n "QR_TIMEOUT" /opt/douyin_download_bot/.env    # 确认显示 900
+  sudo chown douyin:douyin /opt/douyin_download_bot/.env
+  ```
+- 若日志出现「验证码中间页」（xvfb 里无法拖滑块）：说明该服务器 IP 风控较严，可间隔一段时间或更换网络环境重试。
 
-### 方案 ②（推荐，最稳）：本地登录 + 同步浏览器 profile
+### 方式 ②：通过 systemd 服务扫码（滚动重试，不怕 SSH 断线）
 
-1. **本地（Windows）** 有桌面环境，直接登录（必要时手动过滑块）：
-   ```powershell
-   cd <本地项目目录>
-   $env:DOUYIN_HEADLESS="false"; python run.py login     # 扫码登录成功
-   Compress-Archive -Path .\forwarder_data\browser_profile -DestinationPath .\browser_profile.zip -Force
-   scp .\browser_profile.zip ubuntu@<服务器IP>:/tmp/
-   ```
-2. **服务器**解压并修正权限：
-   ```bash
-   cd /opt/douyin_download_bot
-   sudo unzip -o /tmp/browser_profile.zip -d forwarder_data/
-   sudo chown -R douyin:douyin forwarder_data
-   ```
-3. 完成后启动服务（第 5 节），日志出现「小号登录态有效 ✅」即成功。
+直接按第 5 节启动服务即可：服务检测到未登录时会**自动进入扫码模式**（二维码同样截图到 `forwarder_data/login_qr.png`）；
+超时失败后 systemd 会自动重启服务（每 ~10 秒），**相当于每 5 分钟自动重开一个新窗口**，扫到成功为止，全程不受 SSH 断线影响。
 
-> 小提示：若同步后启动报 profile 相关错误，删除 `forwarder_data/browser_profile/SingletonLock`、`SingletonCookie`、`SingletonSocket` 三个锁文件后重试。
-
-### 方案 ③：服务器本身有桌面（VNC/RDP）
+### 方式 ③：服务器本身有桌面（VNC / RDP）
 
 ```bash
 DOUYIN_HEADLESS=false .venv/bin/python run.py login
@@ -256,12 +252,12 @@ sudo systemctl status douyin-forward       # 状态
 | 浏览器启动失败，报缺 `.so` 库 | `sudo .venv/bin/playwright install-deps chromium` 后重启服务 |
 | 日志提示「profile 被占用」 | 有其它进程在使用 `forwarder_data/browser_profile`：`sudo systemctl stop douyin-forward`，`pkill -f run.py`，再重试 |
 | 登录命令报 profile 被占用 | 服务正在运行占用了 profile：`sudo systemctl stop douyin-forward` 后登录，登录完成再 `sudo systemctl start douyin-forward` |
-| 提示「验证码中间页」 | 见第 4 节方案 ②（本地登录 + 同步 profile）；或等待一段时间再试 |
+| 提示「验证码中间页」 | 在服务器上以有界面方式扫码（第 4 节方式 ①/②），或间隔一段时间/换网络环境重试；**注意登录态不能跨机器复制**（原因见第 4 节警告框） |
 | 提示「未找到私信会话」 | 检查 `.env` 的 `DOUYIN_MAIN_ACCOUNT` 是否与大号昵称匹配；确认大号已给小号发过消息；开 `FORWARDER_DUMP_HTML=true` 重启查看转储 HTML |
 | 转发后没解析 | 首次启动只记录"水位"，只处理**启动之后**新转发的视频；想处理历史：设 `DOUYIN_PROCESS_HISTORY=true` 并删除 `state.json` 后重启 |
 | 解析失败（自动重试 3 次后放弃） | 查看日志中的具体错误；抖音解析偶发失败可把该视频重新转发一次触发重试 |
 | xvfb 登录时二维码扫不了 | 确认 `forwarder_data/login_qr.png` 在持续更新（每 ~45s 刷新）；重新执行登录命令 |
-| 想观察浏览器实际画面 | 服务器加装 VNC（如 `x11vnc`）后可看到；或改用方案 ② 本地调试 |
+| 想观察浏览器实际画面 | 服务器加装 VNC（如 `x11vnc`）后可直接看到画面，并按第 4 节方式 ③ 登录 |
 
 ---
 

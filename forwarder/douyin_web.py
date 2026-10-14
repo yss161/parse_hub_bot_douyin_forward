@@ -220,7 +220,7 @@ class DouyinWebReceiver:
         await self._context.add_init_script(STEALTH_SCRIPT)
         self._page = self._context.pages[0] if self._context.pages else await self._context.new_page()
         self._page.set_default_timeout(20000)
-        logger.info("浏览器已启动（profile: %s, headless=%s）", self.settings.browser_profile_dir, self.settings.headless)
+        logger.info(f"浏览器已启动（profile: {self.settings.browser_profile_dir}, headless={self.settings.headless}）")
 
     # ══════════════════════ 登录 ══════════════════════
 

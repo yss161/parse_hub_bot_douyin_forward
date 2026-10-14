@@ -168,30 +168,18 @@ cat <<EOF
 
  【剩余两步】
 
- 第 1 步：完成小号首次登录（按顺序尝试）
-    ※ 登录前请确保服务未启动：如已启动，先执行 sudo systemctl stop $SERVICE_NAME
+ 第 1 步：完成小号首次登录
+    ⚠️ 登录态只能在服务器本机生成，不能从其它电脑复制！
+       （浏览器 Cookie 按操作系统加密，跨系统复制后无法解密、会静默失效）
 
-   ① 推荐：本地登录 + 同步登录态（最稳；不受二维码时效与 SSH 掉线影响）
-     在本地有桌面的电脑（Windows 亦可）执行：
-       DOUYIN_HEADLESS=false python run.py login      # 扫码登录（必要时手动过滑块）
-     然后把整个 forwarder_data/browser_profile 目录同步到服务器：
-       # 本地 Windows：
-       Compress-Archive -Path .\\forwarder_data\\browser_profile -DestinationPath .\\browser_profile.zip -Force
-       scp .\\browser_profile.zip <user>@<server>:/tmp/
-       # 服务器：
-       unzip -o /tmp/browser_profile.zip -d $PROJECT_DIR/forwarder_data/
-       chown -R $RUN_AS:$RUN_AS $PROJECT_DIR/forwarder_data
-
-   ② 备选：服务器上以"有界面"方式扫码（xvfb；需赶二维码时效且 SSH 不能断线）
+   方式 A（推荐）：在服务器上跑一次登录命令，二维码自动截图
      sudo -u $RUN_AS -H env DOUYIN_HEADLESS=false /usr/bin/xvfb-run -a $VENV_DIR/bin/python $PROJECT_DIR/run.py login
-     # 二维码会自动截图保存，下载到本地后用【小号】抖音 App 扫码：
-     #   $PROJECT_DIR/forwarder_data/login_qr.png
-     #   # 下载命令（<登录用户> = 你 ssh 登录服务器的账号，如 root / ubuntu）：
+     # 二维码（约 45 秒刷新）：$PROJECT_DIR/forwarder_data/login_qr.png
+     # 下载（<登录用户> = 你 ssh 登录服务器的账号，如 root / ubuntu）：
      #   scp <登录用户>@<server>:$PROJECT_DIR/forwarder_data/login_qr.png .
-     #   提示：扫码窗口默认 300 秒，可在 .env 调大 DOUYIN_QR_TIMEOUT（如 900）
+     # 超时会自动重开新窗口继续扫；如需更长窗口：在 .env 设 DOUYIN_QR_TIMEOUT=900
 
-   ③ 兜底：纯无头直接登录（新 profile 容易被风控，仅在前两者不可用时尝试）
-     sudo -u $RUN_AS -H $VENV_DIR/bin/python $PROJECT_DIR/run.py login
+   方式 B：直接执行第 2 步启动服务——服务检测到未登录时会自动进入扫码模式（同样滚动重试）
 
  第 2 步：启动服务为系统服务
      sudo systemctl enable --now $SERVICE_NAME

@@ -146,9 +146,11 @@ DOUYIN_HEADLESS=false python run.py login     # Windows PowerShell: $env:DOUYIN_
 > ⚠️ **为什么首次要有界面？** 实测（2026-10）抖音对"无头浏览器 + 全新指纹"会返回「验证码中间页」（滑块验证）。
 > 有界面模式下页面正常，登录一次后 profile 即为"可信"状态，后续可以切回无头模式（`DOUYIN_HEADLESS=true`）在服务器上长期运行。
 >
-> **服务器无桌面的部署方式**：先在任意有桌面的机器（自己的电脑即可）完成一次 `DOUYIN_HEADLESS=false python run.py login`，
-> 然后把整个 `forwarder_data/browser_profile/` 目录打包复制到服务器的同名路径即可。
-> （Linux 服务器也可以安装 xvfb：`apt-get install -y xvfb`，用 `xvfb-run -a python run.py login` + VNC 扫码。）
+> **服务器无桌面的部署方式**：在服务器上用 xvfb 以"有界面"方式扫码
+> （`apt-get install -y xvfb`，然后 `DOUYIN_HEADLESS=false xvfb-run -a python run.py login`，二维码自动截图到 `forwarder_data/login_qr.png`）。
+>
+> ❌ **不要从其他电脑复制登录态**：浏览器 Cookie 按操作系统绑定加密（Windows 用 DPAPI），跨机器/跨系统复制后**无法解密**，
+> 登录态会"静默失效"（日志表现为「未检测到有效登录态」）。**必须先在服务器本机登录一次**。
 
 ### 4. 启动服务
 
@@ -279,9 +281,9 @@ sudo APP_USER=douyin bash deploy/install_ubuntu.sh
 脚本会自动完成：系统依赖 → 虚拟环境 `.venv` → Playwright Chromium → systemd 服务安装
 （模板：`deploy/douyin-forward.service`），并在结束时打印「首次登录 + 启动服务」的具体命令。
 
-> ⚠️ 关键提醒：**首次登录必须"有界面"**——服务器上用 xvfb 以 `DOUYIN_HEADLESS=false` 扫码，
-> 或在本地电脑（有桌面）登录后把 `forwarder_data/browser_profile/` 同步到服务器。
-> 原因（无头新指纹会被抖音风控拦截）与详细做法见 DEPLOY_UBUNTU.md 第 4 节。
+> ⚠️ 关键提醒：**首次登录必须在服务器本机完成**（登录态不能跨机器复制——浏览器 Cookie 按系统加密，复制后会静默失效）：
+> 服务器上用 `xvfb-run -a` 以 `DOUYIN_HEADLESS=false` 扫码，二维码自动截图到 `forwarder_data/login_qr.png`。
+> 原因与详细做法见 DEPLOY_UBUNTU.md 第 4 节。
 
 ---
 
@@ -306,9 +308,9 @@ sudo APP_USER=douyin bash deploy/install_ubuntu.sh
 
 **Q5. 提示「验证码中间页」（滑块验证）怎么办？**
 这是抖音的风控拦截，多见于「无头浏览器 + 全新 profile」的首次访问。处理方式：
-1. 先在**有桌面的机器**上执行 `DOUYIN_HEADLESS=false python run.py login`，窗口可见时手动拖一下滑块、再扫码登录；
-2. 登录成功后将 `forwarder_data/browser_profile/` 目录同步到服务器（覆盖同名目录），服务器端即可用无头模式稳定运行；
-3. 服务运行中途偶发该验证码时，日志会给出提示（每 10 分钟最多一次），一般重新登录或等待一段时间即恢复。
+1. 在**有界面的环境**中执行 `DOUYIN_HEADLESS=false python run.py login`（服务器上可用 `/usr/bin/xvfb-run -a` 包装），窗口可见时手动拖一下滑块、再扫码登录；
+2. 若服务器上无法完成（例如验证码需要手动拖动而 xvfb 中没有可见窗口）：间隔一段时间或更换网络环境重试；服务运行中途偶发该验证码时，日志会给出提示（每 10 分钟最多一次），一般重新登录或等待一段时间即恢复；
+3. ⚠️ 注意：**登录态不能从其他电脑复制**（浏览器 Cookie 按操作系统加密，复制后无法解密、静默失效），务必在服务器本机完成登录。
 
 > 本服务**不会**自动破解验证码（不可靠且不合规），只做检测与引导。
 
