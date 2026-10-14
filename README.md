@@ -192,7 +192,7 @@ python run.py test-url "https://v.douyin.com/xxxxxxx/"
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
-| `DOUYIN_MAIN_ACCOUNT` | 空 | 大号昵称关键字，用于定位会话；留空则选有未读/第一条会话 |
+| `DOUYIN_MAIN_ACCOUNT` | 空 | 大号昵称关键字，用于定位会话；**会严格锁定该会话**（只解析该会话内的新转发，其他会话/群聊的分享会被忽略）；留空则选有未读/第一条会话 |
 | `DOUYIN_POLL_INTERVAL` | `20` | 私信轮询间隔（秒） |
 | `FORWARDER_PARSE_MIN_INTERVAL` | `8` | 两次解析之间的最小间隔（秒），防频繁请求 |
 | `FORWARDER_OUTPUT_DIR` | `./output` | 归档目录 |

@@ -129,6 +129,12 @@ SELF_CLASS_HINTS = ("self", "mine", "is-me", "isme", "right")
 # 私信消息接口数据中，视频分享卡片的视频 ID 字段（实测 2026-10）
 MESSAGE_ITEM_ID_RE = re.compile(r'"itemId"\s*:\s*"(\d{15,})"')
 
+# 消息接口数据中的「会话标记」：每条消息记录归属的会话（如 #0:1:67269605150:7525653966451180602）
+CONVERSATION_MARKER_RE = re.compile(r"#\d{1,2}(?::\d{1,25}){1,4}")
+
+# 接口请求体（protobuf 二进制）中的会话 ID（ASCII 形式，如 0:1:67269605150:7525653966451180602）
+CONVERSATION_ID_RE = re.compile(rb"\d{1,3}:\d{1,3}:\d{6,25}(?::\d{6,25})?")
+
 # 登录态 cookie 名称
 SESSION_COOKIE_NAMES = {"sessionid", "sid_guard", "sid_tt", "sid_ucp_virtual"}
 
@@ -158,6 +164,10 @@ class DouyinWebReceiver:
         self._current_conv_text: str | None = None
         # 已捕获的私信消息接口数据（时间戳, 文本），用于准确提取视频卡片 ID
         self._msg_payloads: list[tuple[float, str]] = []
+        # 接口请求中出现的会话 ID（时间戳, ID），用于锁定「指定会话」
+        self._conv_id_events: list[tuple[float, str]] = []
+        # 锁定后的目标会话 ID（只处理该会话内的消息数据）
+        self._target_conv_id: str | None = None
 
     # ══════════════════════ 生命周期 ══════════════════════
 
@@ -217,6 +227,8 @@ class DouyinWebReceiver:
         self._page.set_default_timeout(20000)
         # 拦截私信消息接口（准确提取视频卡片的 itemId，见 _capture_message_payload）
         self._page.on("response", self._on_response)
+        # 捕获接口请求中的会话 ID（用于锁定目标会话）
+        self._page.on("request", self._on_request)
         logger.info(f"浏览器已启动（profile: {self.settings.browser_profile_dir}, headless={self.settings.headless}）")
 
     # ────────────── 私信消息接口拦截 ──────────────
@@ -228,6 +240,26 @@ class DouyinWebReceiver:
                 asyncio.ensure_future(self._capture_message_payload(response))
         except Exception:
             pass
+
+    def _on_request(self, request: Any) -> None:
+        """同步回调：从消息/会话接口请求（protobuf 请求体）中提取会话 ID。"""
+        try:
+            url = request.url
+            if "imapi.douyin.com" not in url or not ("message" in url or "conversation" in url):
+                return
+            buf = request.post_data_buffer
+            if not buf:
+                return
+            for m in CONVERSATION_ID_RE.finditer(buf):
+                self._record_conv_id(m.group(0).decode("ascii", "ignore"))
+        except Exception:
+            pass
+
+    def _record_conv_id(self, cid: str) -> None:
+        now = time.monotonic()
+        self._conv_id_events.append((now, cid))
+        cutoff = now - 120
+        self._conv_id_events = [e for e in self._conv_id_events if e[0] >= cutoff][-40:]
 
     async def _capture_message_payload(self, response: Any) -> None:
         """捕获消息接口响应（含分享卡片的 itemId、文本消息原文）。"""
@@ -242,6 +274,9 @@ class DouyinWebReceiver:
         # 只保留最近 5 分钟、最多 10 条
         cutoff = time.monotonic() - 300
         self._msg_payloads = [p for p in self._msg_payloads if p[0] >= cutoff][-10:]
+        # 顺带记录响应里出现的会话标记（用于兜底识别目标会话）
+        for m in CONVERSATION_MARKER_RE.finditer(text):
+            self._record_conv_id(m.group(0)[1:])
         logger.debug(f"已捕获消息接口数据: {response.url.split('?')[0]}（{len(text)} 字符）")
 
     def _collect_payload_candidates(self) -> list[tuple[str, str]]:
@@ -249,19 +284,42 @@ class DouyinWebReceiver:
 
         - 分享卡片：itemId -> https://www.douyin.com/video/{itemId}
         - 文本消息：正文中的抖音链接（正则）
+
+        已锁定目标会话时，只提取该会话段内的内容（其他会话/群聊的分享会被忽略）。
         """
         found: dict[str, str] = {}
         for _ts, text in self._msg_payloads:
-            for m in MESSAGE_ITEM_ID_RE.finditer(text):
-                item_id = m.group(1)
-                found.setdefault(f"aweme:{item_id}", f"https://www.douyin.com/video/{item_id}")
-            for url in self._extract_links(text):
-                found.setdefault(f"url:{url}", url)
+            for marker, chunk in self._split_payload_sections(text):
+                if self._target_conv_id and marker != self._target_conv_id:
+                    continue
+                for m in MESSAGE_ITEM_ID_RE.finditer(chunk):
+                    item_id = m.group(1)
+                    found.setdefault(f"aweme:{item_id}", f"https://www.douyin.com/video/{item_id}")
+                for url in self._extract_links(chunk):
+                    found.setdefault(f"url:{url}", url)
         return list(found.items())
+
+    @staticmethod
+    def _split_payload_sections(text: str) -> list[tuple[str, str]]:
+        """按会话标记切分消息接口数据。
+
+        返回 [(会话ID, 该段内容)]；第一个标记之前的内容归到空 ID 段（锁定时会被过滤）。
+        """
+        matches = list(CONVERSATION_MARKER_RE.finditer(text))
+        if not matches:
+            return [("", text)]
+        sections: list[tuple[str, str]] = []
+        if matches[0].start() > 0:
+            sections.append(("", text[: matches[0].start()]))
+        for i, m in enumerate(matches):
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+            sections.append((m.group(0)[1:], text[m.end() : end]))
+        return sections
 
     async def _refresh_for_payload(self) -> bool:
         """刷新聊天页（触发消息接口重新拉取最新消息）并打开目标会话。
 
+        期间从接口请求中锁定「目标会话 ID」，供候选提取时按会话过滤。
         返回 True 表示本轮捕获到了较新的接口数据。
         """
         page = self._page
@@ -272,12 +330,23 @@ class DouyinWebReceiver:
             logger.debug(f"刷新私信页失败（继续）: {e}")
         self._current_conv_text = None
         await self._human_delay(3.5, 5.0)
-        # 打开目标会话（触发该会话的消息接口）
+
+        # 打开目标会话（触发该会话的消息接口；此时捕获到的会话 ID 即为目标）
+        n_before = len(self._conv_id_events)
         try:
             await self._open_main_conversation()
         except Exception:
             pass
         await self._human_delay(2.0, 3.0)
+
+        after = [cid for _ts, cid in self._conv_id_events[n_before:]]
+        if after:
+            target = after[-1]
+            if target != self._target_conv_id:
+                name = (self._current_conv_text or "").split("\n")[0][:24]
+                logger.info(f"已锁定目标会话，仅处理该会话内的转发: {name}（ID: {target}）")
+            self._target_conv_id = target
+
         now = time.monotonic()
         return any(now - ts <= 30 for ts, _ in self._msg_payloads)
 
@@ -649,6 +718,9 @@ class DouyinWebReceiver:
 
         if payload_ok:
             # 接口数据可用：以接口数据为准（视频卡片 itemId + 文本链接）
+            if self.settings.main_account and self._target_conv_id is None and not getattr(self, "_warned_conv_lock", False):
+                self._warned_conv_lock = True
+                logger.warning("未能锁定目标会话 ID（DOUYIN_MAIN_ACCOUNT 是否匹配到会话？），本轮暂按全量扫描")
             candidates: list[IncomingCandidate] = []
             for fp, url in self._collect_payload_candidates():
                 if self.state.is_seen_message(fp):
