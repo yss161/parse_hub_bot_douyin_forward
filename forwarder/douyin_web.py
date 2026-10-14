@@ -85,18 +85,14 @@ LINK_PATTERNS = [
     re.compile(r"https?://(?:www\.)?douyin\.com/note/\d+"),
 ]
 
-# 会话列表项（多级候选）
+# 会话列表项（优先使用实测的真实类名，其余为旧版兜底）
 CONVERSATION_ITEM_SELECTORS = [
+    "[class*='ConversationItemwrapper']",  # 抖音网页版实际类名（2026-10 实测）
+    "[class*='conversationConversationItem']",
     "[class*='conversation-item']",
     "[class*='conversationItem']",
-    "[class*='conversation_item']",
     "[class*='session-item']",
-    "[class*='sessionItem']",
     "[class*='chat-item']",
-    "[class*='chatItem']",
-    "[class*='contact-item']",
-    "[data-e2e*='conversation']",
-    "li[class*='conversation']",
 ]
 
 # 未读角标（多级候选）
@@ -108,29 +104,23 @@ UNREAD_BADGE_SELECTORS = [
     "[class*='dot']",
 ]
 
-# 消息区域容器（多级候选）
+# 消息区域容器（优先使用实测的真实类名，其余为旧版兜底）
 MESSAGE_CONTAINER_SELECTORS = [
+    "[class*='MessageListwrapper']",  # 抖音网页版实际类名（2026-10 实测）
+    "[class*='MessageListlist']",
     "[class*='message-list']",
     "[class*='messageList']",
-    "[class*='message_list']",
     "[class*='chat-content']",
     "[class*='chatContent']",
-    "[class*='message-area']",
-    "[class*='messageArea']",
-    "[class*='msg-list']",
-    "[class*='msgList']",
 ]
 
-# 单条消息（多级候选）
+# 单条消息（优先使用实测的真实类名，其余为旧版兜底）
 MESSAGE_ITEM_SELECTORS = [
+    "[class*='messageMessageBoxmessageBox']",  # 抖音网页版实际类名：每条消息外层（2026-10 实测）
+    "[class*='MessageBoxContentcolumnBox']",
     "[class*='message-item']",
-    "[class*='messageItem']",
-    "[class*='message_item']",
     "[class*='chat-message']",
-    "[class*='chatMessage']",
     "[class*='msg-item']",
-    "[class*='msgItem']",
-    "[data-e2e*='message']",
 ]
 
 # 判定"自己的消息"的类名提示（命中则视为小号自己发出，跳过）
@@ -626,15 +616,17 @@ class DouyinWebReceiver:
             return
         logger.debug(f"导航到私信页: {self.settings.chat_url}")
         try:
-            await page.goto(self.settings.chat_url, wait_until="domcontentloaded")
+            # 抖音为重度 SPA：domcontentloaded 可能长时间不完（实测会超时），用 commit + 固定等待更稳
+            await page.goto(self.settings.chat_url, wait_until="commit", timeout=45000)
         except Exception as e:
             logger.warning(f"打开私信页失败: {e}，回退到首页")
-            await page.goto(self.settings.home_url, wait_until="domcontentloaded")
             try:
+                await page.goto(self.settings.home_url, wait_until="commit", timeout=45000)
+                await self._human_delay(3.0, 5.0)
                 await page.locator("text=私信").first.click(timeout=5000)
             except Exception:
                 pass
-        await self._human_delay(2.0, 3.5)
+        await self._human_delay(3.5, 5.0)
         self._current_conv_text = None
 
     # ────────────── 会话定位 ──────────────
