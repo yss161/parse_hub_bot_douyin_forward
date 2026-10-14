@@ -171,14 +171,7 @@ cat <<EOF
  第 1 步：完成小号首次登录（按顺序尝试）
     ※ 登录前请确保服务未启动：如已启动，先执行 sudo systemctl stop $SERVICE_NAME
 
-   ① 首选：服务器上以"有界面"方式扫码（xvfb，最接近真实浏览器）
-     sudo -u $RUN_AS -H env DOUYIN_HEADLESS=false /usr/bin/xvfb-run -a $VENV_DIR/bin/python $PROJECT_DIR/run.py login
-     # 二维码会自动截图保存，下载到本地后用【小号】抖音 App 扫码：
-     #   $PROJECT_DIR/forwarder_data/login_qr.png
-     #   # 在本机执行（<登录用户> = 你 ssh 登录服务器的账号，如 root / ubuntu）：
-     #   scp <登录用户>@<server>:$PROJECT_DIR/forwarder_data/login_qr.png .
-
-   ② 若日志提示「验证码中间页」（滑块风控，服务器上无法手动完成）：
+   ① 推荐：本地登录 + 同步登录态（最稳；不受二维码时效与 SSH 掉线影响）
      在本地有桌面的电脑（Windows 亦可）执行：
        DOUYIN_HEADLESS=false python run.py login      # 扫码登录（必要时手动过滑块）
      然后把整个 forwarder_data/browser_profile 目录同步到服务器：
@@ -189,7 +182,15 @@ cat <<EOF
        unzip -o /tmp/browser_profile.zip -d $PROJECT_DIR/forwarder_data/
        chown -R $RUN_AS:$RUN_AS $PROJECT_DIR/forwarder_data
 
-   ③ 兜底：纯无头直接登录（新 profile 容易被风控，仅在 ① 不可用时尝试）
+   ② 备选：服务器上以"有界面"方式扫码（xvfb；需赶二维码时效且 SSH 不能断线）
+     sudo -u $RUN_AS -H env DOUYIN_HEADLESS=false /usr/bin/xvfb-run -a $VENV_DIR/bin/python $PROJECT_DIR/run.py login
+     # 二维码会自动截图保存，下载到本地后用【小号】抖音 App 扫码：
+     #   $PROJECT_DIR/forwarder_data/login_qr.png
+     #   # 下载命令（<登录用户> = 你 ssh 登录服务器的账号，如 root / ubuntu）：
+     #   scp <登录用户>@<server>:$PROJECT_DIR/forwarder_data/login_qr.png .
+     #   提示：扫码窗口默认 300 秒，可在 .env 调大 DOUYIN_QR_TIMEOUT（如 900）
+
+   ③ 兜底：纯无头直接登录（新 profile 容易被风控，仅在前两者不可用时尝试）
      sudo -u $RUN_AS -H $VENV_DIR/bin/python $PROJECT_DIR/run.py login
 
  第 2 步：启动服务为系统服务
