@@ -79,6 +79,20 @@ class ForwarderSettings:
     # 目标：@用户名（公开频道/群）、-100 开头的数字 ID（私有）、或 t.me 链接
     tg_target: str = field(default_factory=lambda: _env("TG_TARGET_CHAT"))
 
+    # ─────────────── 登录截图链接服务（把二维码/页面截图变成可点击链接） ───────────────
+    # 只读 HTTP 服务端口（0 = 关闭；仅暴露白名单里的截图/菜单文件，不含登录态）
+    shot_port: int = field(default_factory=lambda: _env_int("FORWARDER_SHOT_PORT", 8765))
+    # 监听地址（默认 0.0.0.0；只允许本机/隧道访问可设为 127.0.0.1）
+    shot_bind: str = field(default_factory=lambda: _env("FORWARDER_SHOT_BIND", "0.0.0.0"))
+    # 对外主机名/IP（留空 = 自动探测公网 IP；AWS 等 NAT 实例可用它显式指定公网 IP）
+    shot_host: str = field(default_factory=lambda: _env("FORWARDER_SHOT_HOST"))
+
+    # ─────────────── 本地缓存清理 ───────────────
+    # 推送成功的作品自动删除本地归档目录（仅当 TG 推送成功时执行；避免磁盘持续增长）
+    cleanup_after_push: bool = field(default_factory=lambda: _env_bool("FORWARDER_CLEANUP_AFTER_PUSH", True))
+    # 定时清理：删除超过 N 小时的本地缓存（output/ 归档、debug/ 转储、downloads/ 残留）；0 = 关闭
+    cache_ttl_hours: int = field(default_factory=lambda: _env_int("FORWARDER_CACHE_TTL_HOURS", 72))
+
     # ─────────────── 解析/归档 ───────────────
     output_dir: Path = field(default_factory=lambda: _env_path("FORWARDER_OUTPUT_DIR", ROOT_DIR / "output"))
     # 两个视频之间的最小解析间隔（秒），避免请求过于频繁
@@ -114,6 +128,9 @@ class ForwarderSettings:
             f"  输出目录         : {self.output_dir}",
             f"  跳过媒体处理     : {self.skip_media_processing}",
             f"  TG 推送          : {('已启用 → ' + self.tg_target) if self.tg_push else '未启用'}",
+            f"  推送后清缓存     : {self.cleanup_after_push}（仅推送成功时执行）",
+            f"  缓存保留时长     : {self.cache_ttl_hours}h（0 = 关闭定时清理）",
+            f"  登录预览端口     : {self.shot_port}（0 = 关闭；截图/菜单查看用）",
             f"  调试/转储 HTML   : {self.debug}/{self.dump_html}",
         ]
         return "\n".join(lines)

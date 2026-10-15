@@ -57,13 +57,14 @@ douyin_download_bot/
 ├── parse_hub_bot/               # 原项目（git 子模块，未改动）
 ├── forwarder/                   # 新增：转发链路
 │   ├── config.py                #   配置（读 .env / 环境变量）
-│   ├── douyin_web.py            #   抖音网页接收端（登录+轮询+链接提取）
+│   ├── douyin_web.py            #   抖音网页接收端（登录+轮询+链接提取+远程控制台）
 │   ├── parser_bridge.py         #   桥接原项目解析流水线
 │   ├── archive.py               #   归档（复制媒体 + metadata.json）
-│   ├── state.py                 #   去重/水位状态
+│   ├── state.py                 #   去重（消息/链接/视频ID）/水位/会话设置值
+│   ├── shot_server.py           #   登录截图/菜单的只读 HTTP 服务（日志输出可点击链接）
 │   ├── reporter.py              #   日志版状态报告器
 │   ├── tg_push.py               #   Telegram 推送（可选，TG_PUSH=true 启用）
-│   └── main.py                  #   服务主循环
+│   └── main.py                  #   服务主循环（含缓存清理）
 ├── run.py                       # 统一入口
 ├── requirements-forwarder.txt   # 依赖清单
 ├── .env.example                 # 配置样例（复制为 .env）
@@ -186,13 +187,86 @@ python run.py test-url "https://v.douyin.com/xxxxxxx/"
 
 ---
 
+## 远程控制台（登录操作 / 更换监测昵称）
+
+服务运行期间（登录等待、日常轮询），**把一句话写入 `forwarder_data/agent_cmd.txt`** 即可与它「对话」；
+文件会被服务读取后自动删除，可一次写多行（每行一条，按顺序执行）。
+
+```bash
+# 示例：把「我的大号」设为监测对象（免编辑 .env、免重启，立即生效）
+echo "我的大号" > forwarder_data/agent_cmd.txt          # 服务器上: /opt/douyin_download_bot/forwarder_data/agent_cmd.txt
+```
+
+| 输入 | 作用 |
+| --- | --- |
+| 任意文本（如 `我的大号`） | 设为**监测的大号昵称**（对话式添加，免指令、免重启；持久化到 `state.json`） |
+| `reset` / `重置` | 清除自定义昵称，恢复 `.env` 的 `DOUYIN_MAIN_ACCOUNT` |
+| `1` ~ `9` | **登录操作菜单**编号（登录/验证页面出现，见下） |
+| `123456` | 登录流程中自动填入验证码；`123456 go` = 填入并回车提交 |
+| `menu` / `菜单` | 重新输出操作菜单 / 使用说明 |
+| `force` / `立即` | 不等轮询周期，立刻执行下一轮检查 |
+
+### 登录操作菜单（回复数字即可点击）
+
+需要人工操作时（扫码、身份验证、短信验证码），服务会**自动扫描页面上的按钮并生成编号菜单**，
+同时写进日志与 `forwarder_data/login_menu.txt`，例如：
+
+```
+【登录操作菜单】当前页面: https://...
+  回复 1  → 点击「接收短信验证码」（⏱ 官方限制约 60 秒一次；验证码有效期约 5 分钟）
+  回复 2  → 点击「使用密码验证」
+  回复 3  → 刷新页面截图并重新输出菜单
+  ...
+```
+
+此时只需：
+
+```bash
+echo 1 > forwarder_data/agent_cmd.txt            # 回复 1 = 点击「接收短信验证码」
+echo 123456 > forwarder_data/agent_cmd.txt       # 收到短信后：自动填入验证码
+echo "123456 go" > forwarder_data/agent_cmd.txt  # 填入并回车提交（一条搞定）
+```
+
+> ⏱ **刷新时间提醒**：二维码约 **1 分钟**过期（服务每 25 秒自动刷新截图，并在日志重新输出最新链接）；
+> 短信验证码官方限制约 **60 秒**一次、有效期约 **5 分钟**——连续获取时服务会提示冷却剩余秒数，请勿频繁重发。
+
+### 登录预览链接（截图/二维码直接用浏览器看）
+
+服务内置一个**只读** HTTP 服务（默认端口 `8765`），把登录二维码、页面预览截图、菜单文本变成日志里的**可点击链接**：
+
+```
+【登录预览链接】
+  二维码   : http://<服务器IP>:8765/login_qr.png?t=1729578123
+  页面预览 : http://<服务器IP>:8765/login_page_state.png?t=1729578123
+```
+
+- 链接带时间戳，**每次自动刷新都会在日志重新输出最新链接**——扫码前请使用最新的一条；
+- 打开根地址 `http://<服务器IP>:8765/` 是一个每 15 秒自动刷新的预览页，无需反复复制链接；
+- 打不开链接时：① 在云控制台安全组放行 `8765` 端口（建议只放行你自己的 IP）；② 或本地执行
+  `ssh -L 8765:127.0.0.1:8765 ubuntu@<服务器IP>` 后访问 `http://127.0.0.1:8765/`；
+  ③ 仍可用 `scp` 下载 `forwarder_data/login_qr.png`；
+- 安全说明：该服务**只暴露白名单文件**（登录二维码/页面截图/菜单），不含任何登录态文件；
+  但仍建议限制访问来源，或登录完成后以 `FORWARDER_SHOT_PORT=0` 关闭。
+
+## 本地缓存清理
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `FORWARDER_CLEANUP_AFTER_PUSH` | `true` | **推送成功后自动删除本地归档目录**（媒体已到 Telegram，无需保留副本） |
+| `FORWARDER_CACHE_TTL_HOURS` | `72` | 定时清理：删除超过该时长的 `output/` 归档、`debug/` 转储、`downloads/` 残留；`0` 关闭 |
+
+- 只删除"最后修改时间超过保留时长"的内容（正在处理的不受影响）；每小时检查一次，启动时也会先清理一次；
+- 清理**不会**丢失去重记录（`state.json` 保存了视频 ID 指纹）：重复转发的作品照常跳过，不会重新下载。
+
+---
+
 ## 配置说明
 
 完整配置见 [.env.example](.env.example)，常用项：
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
-| `DOUYIN_MAIN_ACCOUNT` | 空 | 大号昵称关键字，用于定位会话；**会严格锁定该会话**（只解析该会话内的新转发，其他会话/群聊的分享会被忽略）；留空则选有未读/第一条会话 |
+| `DOUYIN_MAIN_ACCOUNT` | 空 | 大号昵称关键字，用于定位会话；**会严格锁定该会话**（只解析该会话内的新转发，其他会话/群聊的分享会被忽略）；留空则选有未读/第一条会话。**也可以不改这里**——运行中直接往控制台写昵称即可（见上文「远程控制台」） |
 | `DOUYIN_POLL_INTERVAL` | `20` | 私信轮询间隔（秒） |
 | `FORWARDER_PARSE_MIN_INTERVAL` | `8` | 两次解析之间的最小间隔（秒），防频繁请求 |
 | `FORWARDER_OUTPUT_DIR` | `./output` | 归档目录 |
@@ -200,6 +274,10 @@ python run.py test-url "https://v.douyin.com/xxxxxxx/"
 | `FORWARDER_SKIP_MEDIA_PROCESSING` | `true` | 跳过原项目的媒体处理（转码等），归档原始文件；设 `false` 需装 ffmpeg |
 | `TG_PUSH` | `false` | 是否推送解析结果到 Telegram 群组/频道（见下文专节） |
 | `TG_TARGET_CHAT` | 空 | 推送目标：`@用户名`／`-100...` 数字 ID／t.me 链接 |
+| `FORWARDER_CLEANUP_AFTER_PUSH` | `true` | 推送成功后删除本地归档目录 |
+| `FORWARDER_CACHE_TTL_HOURS` | `72` | 本地缓存保留时长（小时）；`0` = 关闭定时清理 |
+| `FORWARDER_SHOT_PORT` | `8765` | 登录预览 HTTP 端口（0 = 关闭；截图/菜单查看用） |
+| `FORWARDER_SHOT_HOST` | 空 | 预览链接里显示的对外 IP（留空自动探测；AWS 等 NAT 实例建议显式指定公网 IP） |
 | `DOUYIN_HEADLESS` | `true` | 无头模式；本机调试可设 `false` 观察浏览器 |
 | `FORWARDER_DUMP_HTML` | `false` | 提取失败时转储页面 HTML 到 `forwarder_data/debug/`（调选择器用） |
 
@@ -295,7 +373,7 @@ sudo APP_USER=douyin bash deploy/install_ubuntu.sh
 
 **Q2. 收不到消息 / 日志提示"未找到私信会话"？**
 - 确认大号已经给小号发过至少一条消息；
-- 确认 `DOUYIN_MAIN_ACCOUNT` 与大号昵称匹配（包含匹配）；
+- 确认监测昵称与大号昵称匹配（包含匹配）——**无需改 .env**，直接往 `forwarder_data/agent_cmd.txt` 写入大号昵称即可更换（见「远程控制台」）；
 - 大号与小号互相添加关注、把消息从「陌生人消息」里移出；
 - 开启 `FORWARDER_DUMP_HTML=true`，查看 `forwarder_data/debug/` 里转储的页面 HTML，并按需调整 `forwarder/douyin_web.py` 顶部的选择器常量。
 
@@ -323,7 +401,20 @@ sudo APP_USER=douyin bash deploy/install_ubuntu.sh
 - `parse_hub_bot/logs/bot.log`（原项目日志目录，滚动 10MB）。
 
 **Q8. 如何完全重置？**
-停止服务，删除 `forwarder_data/state.json`（只清解析记录）或整个 `forwarder_data/browser_profile/`（同时清除登录态，需重新扫码）。
+停止服务，删除 `forwarder_data/state.json`（清解析记录 + 控制台设置的昵称）或整个 `forwarder_data/browser_profile/`（同时清除登录态，需重新扫码）。
+自定义昵称也可以只重置昵称：往控制台写 `reset`。
+
+**Q12. 同一作品被重复转发，会不会重复下载？**
+不会。去重做了三层：消息指纹、链接指纹、**视频 ID 指纹**——即使同一条视频用不同链接（短链/长链）重复转发，日志也会提示
+`检测到重复，已跳过: 作品已在库（视频 ID ...）`，不会重复解析/下载。**本地缓存被自动清理后依然有效**（记录保存在 `state.json`）。
+
+**Q13. 监控的昵称/登录操作不想每次改 .env、也不想到服务器上敲长命令？**
+用「远程控制台 + 登录编号菜单」：写一句话/一个数字到 `forwarder_data/agent_cmd.txt` 即可
+（如 `echo 1 > ...` 点击发送短信验证码、`echo 我的大号 > ...` 换监测对象），详见上文专节。
+
+**Q14. 服务器磁盘会不会被占满？**
+不会无限增长：默认「推送成功即删本地归档」+「超过 72 小时的缓存定时清理」（见「本地缓存清理」）。
+如果你不用 TG 推送、又希望长期保留归档，把 `FORWARDER_CACHE_TTL_HOURS=0` 即可关闭定时清理。
 
 **Q9. 为什么依赖清单里没有 tgcrypto？**
 原项目将其列为依赖，但 tgcrypto 仅用于 Telegram 连接的原生加密加速（可选），且对新版 Python 无预编译轮子、无编译链时会安装失败。本服务不启动 Telegram Bot，运行时用不到，故省略；如你同时还要跑原项目的 TG Bot，可单独 `pip install tgcrypto`。
@@ -352,7 +443,10 @@ Telegram 在境内不可直连。搭好代理后（如本机 7890 端口），�
 ## 技术细节补充
 
 - **接收端**：Playwright 持久化浏览器上下文（`forwarder_data/browser_profile/`），注入 stealth 脚本降低自动化特征；私信页使用 `https://www.douyin.com/chat?isPopup=1`，如抖音改版可通过 `DOUYIN_CHAT_URL` 覆盖。
-- **链接提取**：三级策略 —— ①消息 HTML/文本正则（含 `v.douyin.com` 短链）；②视频卡片点击（新标签页/同页跳转/弹层三种路径）；③失败不标记、下轮重试；失败 3 次后放弃并记录到 `forwarder_data/state.json`。
-- **去重**：消息 DOM 指纹（防重复点击）+ 链接指纹（输入链接与展开后的原始链接各记录一次，防重复解析）。
+- **链接提取**：优先**拦截「私信消息接口」响应**直接读取视频卡片 ID（`itemId` → `/video/{id}`，准确稳定、无需点击）；同时从接口请求中捕获**会话 ID 并锁定指定会话**（其他会话/群聊的分享一律忽略）；接口不可用时回退 DOM 扫描 + 卡片点击（新标签页/同页跳转/弹层三种路径）；失败不标记、下轮重试，失败 3 次后放弃并记录。
+- **去重**：消息指纹（防重复点击）+ 链接指纹（输入链接与展开后的原始链接各记录一次）+ **视频 ID 指纹**（同作品换链接重复转发也会跳过；缓存清理后依然有效）。
+- **提取时的视频播放**：启动参数禁用自动播放 + 全程静音；打开视频页/弹层后立即暂停页内全部音视频，避免播放噪音与"后台自动暂停"干扰。
+- **登录交互**：登录/验证页自动扫描可点击项生成**编号菜单**（写日志 + `login_menu.txt`）；`agent_cmd.txt` 支持回复编号、验证码直填（`123456` / `123456 go`）、纯文本设置监测昵称（免重启）；二维码/页面截图经内置只读 HTTP 服务（`shot_server.py`）输出为带时间戳的可点击链接，每次刷新重新输出。
+- **缓存清理**：推送成功后按配置删除本地归档；另按 `FORWARDER_CACHE_TTL_HOURS` 定时清理 `output/`、`debug/`、`downloads/` 中过期内容（启动时也会清理一次）。
 - **归档时机**：原项目流水线退出时会清理临时目录，归档发生在 `with ParsePipeline(...)` 块内、清理之前（见 `forwarder/parser_bridge.py` 注释）。
 - **媒体处理**：默认 `FORWARDER_SKIP_MEDIA_PROCESSING=true`——原项目的媒体处理是为适配 Telegram 限制（转码/长图切割）而设计的，本服务归档原始文件即可；如需与原项目完全一致的产物，可设为 `false`。

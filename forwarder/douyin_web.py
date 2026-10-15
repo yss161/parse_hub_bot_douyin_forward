@@ -17,10 +17,19 @@
   - 反检测：真实 UA / 时区 / locale、隐藏 webdriver 特征、操作间随机延时；
   - 【风控须知】抖音对"无头浏览器 + 陌生指纹"较敏感，可能返回「验证码中间页」（滑块）。
     本模块会检测该情况：有界面模式（DOUYIN_HEADLESS=false）下提示手动完成验证；
-    无头模式下给出"先在桌面机登录、再同步 browser_profile 目录到服务器"的指引。
+    无头模式下指引改用 xvfb/有界面方式在服务器本机登录（登录态不能跨机器复制）。
     实测（2026-10 于国内家庭宽带）：
       · 有界面首次打开 douyin.com → 正常展示「抖音精选」页并自动弹出登录二维码 ✅
       · 无头模式首次访问 → 易触发滑块验证码（风控），需先用有界面完成一次登录
+
+交互方式（远程控制台，免记忆指令）：
+  - 登录页/验证页会自动识别页面上的可点击按钮并生成【编号菜单】输出到日志，
+    只需把编号（如 1）写入 forwarder_data/agent_cmd.txt 即可点击对应按钮
+    （例：回复 1 = 点击「接收短信验证码」，并附官方刷新时间提醒）；
+  - 纯数字（4~8 位，如 123456）= 自动填入验证码输入框；后加 go 表示填入并回车提交；
+  - 纯文本（如 我的大号）= 设为"监测的大号昵称"，免编辑 .env、免重启、即时生效；
+  - 登录二维码 / 页面预览截图 / 菜单 通过内置只读 HTTP 服务变成【可点击链接】写进日志，
+    并在每次自动刷新时重新输出（链接带时间戳，永远是最新画面）。
 """
 
 from __future__ import annotations
@@ -44,7 +53,8 @@ from playwright.async_api import (
 )
 
 from .config import ForwarderSettings
-from .state import StateStore, fingerprint
+from .shot_server import ShotServer
+from .state import StateStore, fingerprint, video_id_from_url
 
 logger = logger.bind(name="Forwarder/DouyinWeb")
 
@@ -74,6 +84,10 @@ LAUNCH_ARGS = [
     "--disable-setuid-sandbox",
     "--disable-dev-shm-usage",
     "--disable-gpu",
+    # 提取链接时可能打开视频页：禁止自动播放 + 全程静音，
+    # 避免视频播放/后台自动暂停带来的干扰与资源消耗
+    "--autoplay-policy=user-gesture-required",
+    "--mute-audio",
 ]
 
 # 私信消息中可能出现的抖音链接形式
@@ -138,6 +152,35 @@ CONVERSATION_ID_RE = re.compile(rb"\d{1,3}:\d{1,3}:\d{6,25}(?::\d{6,25})?")
 # 登录态 cookie 名称
 SESSION_COOKIE_NAMES = {"sessionid", "sid_guard", "sid_tt", "sid_ucp_virtual"}
 
+# ── 登录页「编号菜单」：自动识别这些常见选项并生成编号供回复 ──
+LOGIN_OPTION_TEXTS = [
+    "接收短信验证码",
+    "获取验证码",
+    "发送验证码",
+    "重新获取",
+    "使用密码验证",
+    "密码验证",
+    "切换验证方式",
+    "其他验证方式",
+    "同意并登录",
+    "确认登录",
+    "同意",
+    "确认",
+    "登录",
+    "下一步",
+    "刷新二维码",
+    "点击刷新",
+]
+
+# 命中这些字样即视为"获取短信验证码"类操作（会提示官方 60 秒频率限制）
+SMS_OPTION_HINTS = ("接收短信验证码", "获取验证码", "发送验证码", "重新获取")
+SMS_COOLDOWN_SECONDS = 60
+
+# 编号菜单里"刷新"项的占位 label
+_REFRESH_OPTION = "__refresh__"
+# 旧版自由指令的动词集合（向后兼容）
+_LEGACY_VERBS = {"click_text", "fill", "type", "press", "click", "drag", "wait"}
+
 
 # ────────────────────────────── 数据结构 ──────────────────────────────
 
@@ -168,15 +211,34 @@ class DouyinWebReceiver:
         self._conv_id_events: list[tuple[float, str]] = []
         # 锁定后的目标会话 ID（只处理该会话内的消息数据）
         self._target_conv_id: str | None = None
+        # 登录截图/菜单的只读 HTTP 服务（日志中输出可点击链接用）
+        self._shots: ShotServer | None = None
+        # 登录页当前可点击选项（编号菜单）：[(label, note)]
+        self._login_options: list[tuple[str, str]] = []
+        # 上次输出菜单的内容签名与时间（避免日志刷屏）
+        self._login_menu_state: str = ""
+        self._last_menu_log_ts: float = 0.0
+        # 上次点击"获取短信验证码"类按钮的时间（用于官方 60 秒频率提醒）
+        self._last_sms_at: float = 0.0
+        # 重复作品/消息的日志去重（同一 key 在单次进程内最多提示一次）
+        self._dup_logged: set[str] = set()
+        # 控制台要求"立即执行下一轮"的标记（由主循环消费）
+        self._force_poll: bool = False
+        # 是否已提示过"未能锁定目标会话"
+        self._warned_conv_lock: bool = False
 
     # ══════════════════════ 生命周期 ══════════════════════
 
     async def start(self) -> None:
         """启动浏览器并确保小号已登录。"""
         await self._ensure_browser()
+        self._start_shots()
         await self.ensure_login()
 
     async def close(self) -> None:
+        if self._shots is not None:
+            self._shots.stop()
+            self._shots = None
         for closer in (
             getattr(self._context, "close", None),
             getattr(self._pw, "stop", None),
@@ -190,6 +252,29 @@ class DouyinWebReceiver:
         self._context = None
         self._page = None
         self._pw = None
+
+    # ────────────── 登录截图链接服务 ──────────────
+
+    def _start_shots(self) -> None:
+        """启动登录截图/菜单的只读 HTTP 服务（把截图变成日志里可点击的链接）。"""
+        if self._shots is not None:
+            return
+        server = ShotServer(
+            self.settings.data_dir,
+            port=self.settings.shot_port,
+            bind=self.settings.shot_bind,
+            public_host=self.settings.shot_host,
+        )
+        if server.start():
+            self._shots = server
+
+    def _shot_link(self, name: str) -> str:
+        """截图/菜单文件的查看链接；HTTP 服务不可用时回退为本地路径。"""
+        if self._shots is not None:
+            url = self._shots.url(name)
+            if url:
+                return url
+        return str(self.settings.data_dir / name)
 
     async def _ensure_browser(self) -> None:
         if self._context is not None:
@@ -286,6 +371,7 @@ class DouyinWebReceiver:
         - 文本消息：正文中的抖音链接（正则）
 
         已锁定目标会话时，只提取该会话段内的内容（其他会话/群聊的分享会被忽略）。
+        已处理过的作品（视频 ID 级去重）在这里直接跳过，避免重复解析。
         """
         found: dict[str, str] = {}
         for _ts, text in self._msg_payloads:
@@ -294,8 +380,18 @@ class DouyinWebReceiver:
                     continue
                 for m in MESSAGE_ITEM_ID_RE.finditer(chunk):
                     item_id = m.group(1)
-                    found.setdefault(f"aweme:{item_id}", f"https://www.douyin.com/video/{item_id}")
+                    key = f"aweme:{item_id}"
+                    if key in found:
+                        continue
+                    if self.state.is_video_processed(item_id):
+                        self._log_duplicate(key, f"作品已在库（视频 ID {item_id}），重复转发不再解析")
+                        continue
+                    found[key] = f"https://www.douyin.com/video/{item_id}"
                 for url in self._extract_links(chunk):
+                    vid = video_id_from_url(url)
+                    if vid and self.state.is_video_processed(vid):
+                        self._log_duplicate(f"url:{url}", f"作品已在库（视频 ID {vid}），重复链接不再解析")
+                        continue
                     found.setdefault(f"url:{url}", url)
         return list(found.items())
 
@@ -380,6 +476,9 @@ class DouyinWebReceiver:
 
         logger.warning("未检测到有效登录态，开始扫码登录流程")
         await self._login_flow()
+        # 登录完成后清空编号菜单（避免日常运行时误点登录页元素）
+        self._login_options = []
+        self._login_menu_state = ""
         logger.success("小号登录完成 ✅（可继续使用）")
 
     # ────────────── 风控检测与处理 ──────────────
@@ -405,7 +504,8 @@ class DouyinWebReceiver:
 
         本服务不尝试自动破解验证码（既不可靠也不安全）：
         - 有界面模式（DOUYIN_HEADLESS=false）：提示在浏览器窗口中手动完成滑块验证，等待通过；
-        - 无头模式：无法手动操作，给出「先本机登录、再同步浏览器 profile 到服务器」的指引并报错退出。
+        - 无头模式：无法手动操作，指引改用 xvfb/有界面方式在服务器【本机】登录并报错退出
+          （登录态不能跨机器复制：浏览器 Cookie 按机器加密，复制后会静默失效）。
         """
         page = self._page
         assert page is not None
@@ -414,21 +514,24 @@ class DouyinWebReceiver:
             await page.screenshot(path=str(shot))
         except Exception:
             pass
+        shot_link = self._shot_link("login_captcha.png")
 
         if self.settings.headless:
             raise RuntimeError(
                 "抖音返回了「验证码中间页」（滑块验证），无头模式无法手动完成。\n"
                 "可选方案：\n"
-                "  1) 在【有桌面的机器】上执行:  DOUYIN_HEADLESS=false python run.py login\n"
-                "     扫码登录成功后，把 forwarder_data/browser_profile/ 整个目录复制到服务器（覆盖同名目录）；\n"
-                "  2) Linux 服务器安装 xvfb（apt-get install -y xvfb），用 xvfb + VNC 打开桌面窗口手动过验证；\n"
-                "  3) 间隔一段时间再试（风控可能临时触发）。\n"
-                f"本次页面截图: {shot}"
+                "  1) 在服务器上用 xvfb 以「有界面」方式完成一次登录（二维码/截图可通过日志中的预览链接查看）：\n"
+                "     sudo -u <服务用户> -H env DOUYIN_HEADLESS=false xvfb-run -a python run.py login\n"
+                "  2) 在本地电脑上跑:  DOUYIN_HEADLESS=false python run.py login 手动过滑块后扫码；\n"
+                "     ⚠️ 不要把 browser_profile 复制到服务器——Cookie 按机器加密，跨机器复制会静默失效；\n"
+                "  3) 间隔一段时间再试（风控可能临时触发），或更换服务器网络出口。\n"
+                f"本次页面截图: {shot_link}"
             )
 
         logger.warning(
-            f"检测到抖音「验证码中间页」（滑块验证），请在浏览器窗口中【手动完成验证】；"
-            f"页面截图: {shot}（{self.settings.qr_timeout}s 内未通过将超时）"
+            f"检测到抖音「验证码中间页」（滑块验证），请在浏览器窗口中【手动完成验证】；\n"
+            f"  当前页面预览: {shot_link}\n"
+            f"  （{self.settings.qr_timeout}s 内未通过将超时）"
         )
         deadline = time.monotonic() + self.settings.qr_timeout
         while time.monotonic() < deadline:
@@ -510,18 +613,19 @@ class DouyinWebReceiver:
         return False
 
     async def _try_agent_cmd(self) -> bool:
-        """执行「远程协助」指令文件（forwarder_data/agent_cmd.txt）。
+        """执行「远程控制台」输入文件（forwarder_data/agent_cmd.txt，每行一条，执行后自动删除）。
 
-        用于人工介入未知页面（如「身份验证」）：把要做的操作写入该文件（UTF-8，每行一条），
-        本方法在登录等待期间每 3 秒检查一次，执行后自动删除文件。
-        支持指令：
-            click_text 接收短信验证码     # 按文本点击元素
-            fill 123456                   # 向页面第一个可见输入框输入内容
-            type 123456                   # 向当前焦点输入
-            press Enter
-            click 720 459                 # 按视口坐标点击（与 login_page_state.png 像素一致）
-            drag 300 400 800 400          # 按住拖动（滑块等）
-            wait 2                        # 等待秒数
+        免记忆指令的对话式交互（登录等待期间每 3 秒检查一次，日常运行每轮轮询检查）：
+
+            1 ~ 9             登录页面编号菜单中的选项（回复 1 = 点击「接收短信验证码」……）
+            123456            纯数字（4~8 位）= 填入验证码输入框（登录流程中）
+            123456 go         填入验证码并回车提交（go / enter / 回车 均可）
+            menu / help / 菜单 重新输出菜单 / 使用说明
+            任意其它文本       设为"监测的大号昵称"（免编辑 .env、免重启，即时生效）
+            reset / 重置       清除自定义昵称，恢复 .env 默认值
+            force / now / 立即 不等轮询周期，立刻执行下一轮检查
+
+        兼容旧版自由指令：click_text / fill / type / press / click x y / drag x1 y1 x2 y2 / wait
         """
         page = self._page
         if page is None:
@@ -541,60 +645,396 @@ class DouyinWebReceiver:
         executed = False
         for line in lines:
             try:
-                op, _, arg = line.partition(" ")
-                op, arg = op.strip().lower(), arg.strip()
-                if op == "click_text":
-                    await page.locator(f"text={arg}").first.click(timeout=5000)
-                elif op == "fill":
-                    # 优先匹配验证码/密码输入框，避免误填到背景页面的搜索框等
-                    target = None
-                    for sel in ("input[placeholder*='验证码']", "input[type='password']", "input[placeholder*='密码']"):
-                        for el in await page.query_selector_all(sel):
-                            try:
-                                if await el.is_visible():
-                                    target = el
-                                    break
-                            except Exception:
-                                continue
-                        if target is not None:
-                            break
-                    if target is None:
-                        # 兜底：取 DOM 中最后一个可见输入框（弹窗一般后置在页面末尾）
-                        for el in reversed(await page.query_selector_all("input")):
-                            try:
-                                if await el.is_visible():
-                                    target = el
-                                    break
-                            except Exception:
-                                continue
-                    if target is None:
-                        raise RuntimeError("页面上没有可见的输入框")
-                    await target.click()
-                    await page.keyboard.type(arg, delay=60)
-                elif op == "type":
-                    await page.keyboard.type(arg, delay=60)
-                elif op == "press":
-                    await page.keyboard.press(arg or "Enter")
-                elif op == "click":
-                    x, y = (float(v) for v in arg.split()[:2])
-                    await page.mouse.click(x, y)
-                elif op == "drag":
-                    x1, y1, x2, y2 = (float(v) for v in arg.split()[:4])
-                    await page.mouse.move(x1, y1)
-                    await page.mouse.down()
-                    for i in range(1, 11):
-                        await page.mouse.move(x1 + (x2 - x1) * i / 10, y1 + (y2 - y1) * i / 10)
-                        await asyncio.sleep(0.03)
-                    await page.mouse.up()
-                elif op == "wait":
-                    await asyncio.sleep(float(arg or "1"))
+                if await self._run_console_line(line):
+                    executed = True
+                    logger.info(f"控制台指令已执行: {line}")
                 else:
-                    raise RuntimeError(f"未知指令: {op}")
-                executed = True
-                logger.info(f"远程协助指令已执行: {line}")
+                    logger.warning(f"控制台指令未执行: {line}")
             except Exception as e:
-                logger.warning(f"远程协助指令执行失败: {line} -> {e}")
+                logger.warning(f"控制台指令执行失败: {line} -> {e}")
+
+        if executed:
+            # 指令执行后：刷新页面快照与菜单，便于连续操作
+            await self._snapshot_login_page()
+            if self._login_options:
+                await self._log_login_menu(force=True)
         return executed
+
+    # ────────────── 远程控制台：解析与执行 ──────────────
+
+    async def _run_console_line(self, line: str) -> bool:
+        """执行一条控制台输入，返回是否已处理。"""
+        page = self._page
+        low = line.strip().lower()
+
+        # 1) 菜单 / 帮助
+        if low in ("menu", "help", "菜单", "指令", "状态", "status"):
+            if self._login_options:
+                await self._log_login_menu(force=True)
+            else:
+                self._log_console_help()
+            return True
+
+        # 2) 清除自定义监测昵称
+        if low in ("reset", "重置", "清除", "默认"):
+            old = self.state.get_value("main_account")
+            self.state.clear_value("main_account")
+            self.state.save()
+            self._target_conv_id = None
+            self._current_conv_text = None
+            self._warned_conv_lock = False
+            logger.success(
+                f"✅ 已清除自定义监测昵称（原值: {old or '(无)'}），恢复 .env 默认值: "
+                f"{self.settings.main_account or '(未设置，自动选择会话)'}"
+            )
+            return True
+
+        # 3) 编号选项（登录菜单）：回复数字即点击对应按钮
+        if re.fullmatch(r"\d{1,2}", low):
+            n = int(low)
+            if self._login_options:
+                if 1 <= n <= len(self._login_options):
+                    await self._click_login_option(self._login_options[n - 1][0])
+                    return True
+                raise RuntimeError(f"选项 {n} 超范围（当前菜单共 {len(self._login_options)} 项）")
+            self._log_console_help()
+            return True
+
+        # 4) 纯数字验证码：自动填入（可选 go 回车提交）
+        m = re.fullmatch(r"(\d{4,8})(?:\s+(go|enter|回车|提交))?", low)
+        if m:
+            if page is None:
+                raise RuntimeError("浏览器尚未启动")
+            code, submit = m.group(1), bool(m.group(2))
+            if not await self._fill_verification_code(code):
+                raise RuntimeError("当前页面没有可见的验证码输入框（登录流程中才有）")
+            if submit:
+                await page.keyboard.press("Enter")
+                await self._human_delay(0.6, 1.2)
+                logger.info("已回车提交验证码")
+            return True
+
+        # 5) 刷新页面截图
+        if low in ("刷新", "refresh"):
+            await self._capture_qr(self.settings.qr_image_path)
+            await self._snapshot_login_page()
+            logger.info(f"已刷新页面截图: {self._shot_link('login_page_state.png')}")
+            return True
+
+        # 6) 立即执行下一轮
+        if low in ("force", "now", "立即", "现在"):
+            self._force_poll = True
+            logger.info("已记录：本轮结束后立即执行下一轮检查")
+            return True
+
+        # 7) 兼容旧版自由指令
+        legacy = await self._run_legacy_command(line)
+        if legacy is not None:
+            return legacy
+
+        # 8) 页面上的编号选项若能被文本直接命中，也允许按文本点击（免记编号）
+        if self._login_options and page is not None:
+            for label, _note in self._login_options:
+                if label != _REFRESH_OPTION and label and label in line:
+                    await self._click_login_option(label)
+                    return True
+
+        # 9) 其它纯文本 = 设置"监测的大号昵称"（对话式添加，免指令、免重启）
+        name = line.strip()
+        if not name or len(name) > 60:
+            raise RuntimeError("无法识别的输入（昵称长度需 1~60 字符）")
+        self.state.set_value("main_account", name)
+        self.state.save()
+        self._target_conv_id = None
+        self._current_conv_text = None
+        self._warned_conv_lock = False
+        logger.success(
+            f"✅ 已将「监测的大号昵称」更新为: {name}（免重启，下一轮轮询即按新昵称定位会话；"
+            "输入 reset 可恢复 .env 默认值）"
+        )
+        return True
+
+    async def _run_legacy_command(self, line: str) -> bool | None:
+        """兼容旧版自由指令；非旧指令返回 None。"""
+        page = self._page
+        op, _, arg = line.partition(" ")
+        op, arg = op.strip().lower(), arg.strip()
+        if op not in _LEGACY_VERBS:
+            return None
+        if page is None:
+            raise RuntimeError("浏览器尚未启动")
+
+        if op == "click_text":
+            await page.locator(f"text={arg}").first.click(timeout=5000)
+        elif op == "fill":
+            if not await self._fill_input(arg):
+                raise RuntimeError("页面上没有可见的输入框")
+        elif op == "type":
+            await page.keyboard.type(arg, delay=60)
+        elif op == "press":
+            await page.keyboard.press(arg or "Enter")
+        elif op == "click":
+            x, y = (float(v) for v in arg.split()[:2])
+            await page.mouse.click(x, y)
+        elif op == "drag":
+            x1, y1, x2, y2 = (float(v) for v in arg.split()[:4])
+            await page.mouse.move(x1, y1)
+            await page.mouse.down()
+            for i in range(1, 11):
+                await page.mouse.move(x1 + (x2 - x1) * i / 10, y1 + (y2 - y1) * i / 10)
+                await asyncio.sleep(0.03)
+            await page.mouse.up()
+        elif op == "wait":
+            await asyncio.sleep(float(arg or "1"))
+        return True
+
+    async def _find_visible_input(self) -> ElementHandle | None:
+        """定位当前页面上"最可能"的目标输入框（验证码/密码优先，兜底最后一个可见 input）。"""
+        page = self._page
+        if page is None:
+            return None
+        for sel in ("input[placeholder*='验证码']", "input[type='password']", "input[placeholder*='密码']"):
+            for el in await page.query_selector_all(sel):
+                try:
+                    if await el.is_visible():
+                        return el
+                except Exception:
+                    continue
+        # 兜底：取 DOM 中最后一个可见输入框（弹窗一般后置在页面末尾）
+        for el in reversed(await page.query_selector_all("input")):
+            try:
+                if await el.is_visible():
+                    return el
+            except Exception:
+                continue
+        return None
+
+    async def _fill_input(self, text: str) -> bool:
+        """向页面第一个可见输入框填入内容（优先验证码/密码框）。"""
+        target = await self._find_visible_input()
+        if target is None:
+            return False
+        await target.click()
+        await target.fill(text)
+        return True
+
+    async def _fill_verification_code(self, code: str) -> bool:
+        """填入短信验证码。"""
+        target = await self._find_visible_input()
+        if target is None:
+            return False
+        await target.click()
+        await target.fill(code)
+        logger.info(f"已填入验证码: {code}（如需回车提交，输入 `{code} go`）")
+        return True
+
+    # ────────────── 登录编号菜单 ──────────────
+
+    async def _login_option_locator(self, label: str):
+        """定位登录页面上某个选项（优先 button 角色，兜底文本匹配）。"""
+        page = self._page
+        assert page is not None
+        loc = page.get_by_role("button", name=label)
+        try:
+            if await loc.count() > 0:
+                return loc
+        except Exception:
+            pass
+        return page.locator(f"text={label}")
+
+    async def _collect_login_options(self) -> None:
+        """扫描登录页上的可点击项，生成编号菜单（供"回复数字"使用）。"""
+        page = self._page
+        if page is None:
+            return
+        options: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for text in LOGIN_OPTION_TEXTS:
+            try:
+                loc = await self._login_option_locator(text)
+                if await loc.count() > 0 and await loc.first.is_visible():
+                    if text not in seen:
+                        seen.add(text)
+                        options.append((text, self._option_note(text)))
+            except Exception:
+                continue
+        # 兜底：页面改版时，补充可见按钮/role=button（避免菜单为空）
+        if len(options) < 9:
+            try:
+                for el in await page.query_selector_all("button:visible, [role='button']:visible"):
+                    try:
+                        label = re.sub(r"\s+", " ", (await el.inner_text()) or "").strip()
+                        if not label or len(label) > 14 or label in seen:
+                            continue
+                        if any(bad in label for bad in ("下载", "客户端", "反馈", "举报")):
+                            continue
+                        seen.add(label)
+                        options.append((label, ""))
+                        if len(options) >= 9:
+                            break
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+        # 末尾固定追加"刷新"
+        options.append((_REFRESH_OPTION, "刷新页面截图，并重新输出菜单"))
+        self._login_options = options
+
+    @staticmethod
+    def _option_note(text: str) -> str:
+        if any(h in text for h in SMS_OPTION_HINTS):
+            return f"⏱ 官方限制约 {SMS_COOLDOWN_SECONDS} 秒一次；验证码有效期约 5 分钟"
+        if "密码" in text:
+            return "改用账号密码方式通过验证"
+        if text in ("登录", "确认登录", "同意并登录", "确认", "下一步"):
+            return "提交当前页面操作"
+        return ""
+
+    async def _log_login_menu(self, *, force: bool = False) -> None:
+        """输出登录操作菜单（编号选项）；菜单未变化时每 60 秒最多重复一次。"""
+        await self._collect_login_options()
+        state_key = "|".join(label for label, _ in self._login_options)
+        now = time.monotonic()
+        if not force and state_key == self._login_menu_state and now - self._last_menu_log_ts < 60:
+            return
+        self._login_menu_state = state_key
+        self._last_menu_log_ts = now
+
+        page = self._page
+        url = (page.url if page is not None else "") or "-"
+        lines = [f"【登录操作菜单】当前页面: {url}"]
+        for i, (label, note) in enumerate(self._login_options, start=1):
+            if label == _REFRESH_OPTION:
+                lines.append(f"  回复 {i}  → 刷新页面截图并重新输出菜单")
+            else:
+                suffix = f"（{note}）" if note else ""
+                lines.append(f"  回复 {i}  → 点击「{label}」{suffix}")
+        lines += [
+            "  输入 6 位验证码（如 123456）→ 自动填入；输入 `123456 go` → 填入并回车提交",
+            "  输入菜单以外的文本 → 设为「监测的大号昵称」（免重启即时生效）",
+            "  ⏱ 刷新时间提醒：二维码约 1 分钟过期（本服务每 25 秒自动刷新截图）；",
+            f"     短信验证码官方限制约 {SMS_COOLDOWN_SECONDS} 秒一次、有效期约 5 分钟，请勿频繁重发",
+            f"  回复方式：把编号或内容写入 {self.settings.data_dir / 'agent_cmd.txt'}（UTF-8，执行后自动删除）",
+            f"  菜单文件（可随时查看最新版）: {self._shot_link('login_menu.txt')}",
+        ]
+        block = "\n".join(lines)
+        logger.info("\n" + block)
+        try:
+            (self.settings.data_dir / "login_menu.txt").write_text(block + "\n", encoding="utf-8")
+        except Exception:
+            pass
+
+    def _log_console_help(self) -> None:
+        """日常运行时的控制台使用说明（无登录菜单时）。"""
+        account = self.effective_main_account or "(未设置：自动选择会话)"
+        lines = [
+            "【远程控制台】使用说明",
+            f"  当前监测的大号昵称: {account}",
+            "  任意文本（如：我的大号）→ 设为监测的大号昵称（免重启，立即生效）",
+            "  reset / 重置        → 清除自定义昵称，恢复 .env 默认值",
+            "  force / now / 立即  → 不等待轮询周期，立刻执行下一轮检查",
+            "  菜单 / help         → 重新显示本说明",
+            "  纯数字验证码(4~8位)  → 登录流程中填入验证码输入框；`123456 go` = 填入并回车",
+            "  登录/验证页会自动给出编号菜单：把数字写入指令文件即可点击对应按钮",
+            f"  写入方式: 把内容写入 {self.settings.data_dir / 'agent_cmd.txt'}（UTF-8，每行一条，执行后自动删除）",
+            f"  说明文件（可随时查看最新版）: {self._shot_link('agent_help.txt')}",
+        ]
+        block = "\n".join(lines)
+        logger.info("\n" + block)
+        try:
+            (self.settings.data_dir / "agent_help.txt").write_text(block + "\n", encoding="utf-8")
+        except Exception:
+            pass
+
+    async def _click_login_option(self, label: str) -> None:
+        """点击登录菜单中的一个选项（带官方刷新时间提醒）。"""
+        page = self._page
+        assert page is not None
+
+        if label == _REFRESH_OPTION:
+            await self._capture_qr(self.settings.qr_image_path)
+            await self._snapshot_login_page()
+            logger.info(f"已刷新页面截图: {self._shot_link('login_page_state.png')}")
+            return
+
+        # 短信验证码类操作：提醒官方频率限制（仅提醒，不阻止）
+        if any(h in label for h in SMS_OPTION_HINTS):
+            now = time.monotonic()
+            if self._last_sms_at and now - self._last_sms_at < SMS_COOLDOWN_SECONDS:
+                waited = int(now - self._last_sms_at)
+                logger.warning(
+                    f"⏱ 提示：距上次获取验证码仅 {waited} 秒，抖音官方限制约 "
+                    f"{SMS_COOLDOWN_SECONDS} 秒一次，过频可能提示「操作频繁」；"
+                    f"建议再等 {max(1, SMS_COOLDOWN_SECONDS - waited)} 秒（仍将尝试点击）"
+                )
+            self._last_sms_at = now
+
+        loc = await self._login_option_locator(label)
+        await loc.first.click(timeout=5000)
+        await self._human_delay(1.0, 2.0)
+        logger.info(f"已点击「{label}」")
+        # 页面状态可能变化：等待加载后刷新快照与菜单
+        await asyncio.sleep(0.8)
+        await self._snapshot_login_page()
+        await self._log_login_menu(force=True)
+
+    async def _log_login_links(self, *, full: bool = False, reason: str = "") -> None:
+        """把登录二维码 / 页面预览输出的可点击链接（每次带新时间戳=最新画面）。"""
+        qr = self._shot_link("login_qr.png")
+        state_shot = self._shot_link("login_page_state.png")
+        title = "【登录预览链接】" + (f"（{reason}）" if reason else "")
+        lines = [title, f"  二维码   : {qr}", f"  页面预览 : {state_shot}"]
+        if full:
+            lines += [
+                "  ⏱ 二维码约 1 分钟自动过期——请始终使用本行【最新】链接/截图，重复扫旧图无效；",
+                "     截图每 25 秒自动刷新，日志中也会同步重新输出。",
+                "  打不开链接时：① 云安全组放行端口；② 或 SSH 端口转发后访问 http://127.0.0.1:8765/；",
+                f"     ③ 或直接下载文件: {self.settings.data_dir / 'login_qr.png'}",
+            ]
+        logger.info("\n" + "\n".join(lines))
+
+    # ────────────── 会话设置的大号昵称 ──────────────
+
+    @property
+    def effective_main_account(self) -> str:
+        """当前生效的监测大号昵称：会话设置值优先，其次 .env 配置。"""
+        return self.state.get_value("main_account") or self.settings.main_account
+
+    def consume_force_poll(self) -> bool:
+        """取出并清除"立即执行下一轮"标记（供主循环使用）。"""
+        value = self._force_poll
+        self._force_poll = False
+        return value
+
+    # ────────────── 重复作品日志去重 ──────────────
+
+    def _log_duplicate(self, key: str, reason: str) -> None:
+        """输出"重复作品/消息"提示（同一 key 在单次进程内最多一次，避免刷屏）。"""
+        if key in self._dup_logged:
+            return
+        if len(self._dup_logged) > 2000:
+            self._dup_logged.clear()
+        self._dup_logged.add(key)
+        logger.info(f"检测到重复，已跳过: {reason}")
+
+    # ────────────── 媒体暂停（防止播放干扰） ──────────────
+
+    async def _stop_media(self, page: Page | None = None) -> None:
+        """暂停并静音页面上的所有音视频。
+
+        获取链接时会短暂打开视频页/弹层，视频自动播放会带来噪音、资源消耗，
+        还会因多标签页被后台自动暂停等造成干扰——这里统一在不使用后立即停下。
+        """
+        target = page or self._page
+        if target is None:
+            return
+        try:
+            await target.evaluate(
+                "() => { document.querySelectorAll('video,audio').forEach(el => "
+                "{ try { el.pause(); el.muted = true; } catch (e) {} }); }"
+            )
+        except Exception:
+            pass
 
     async def _login_flow(self) -> None:
         page = self._page
@@ -631,12 +1071,11 @@ class DouyinWebReceiver:
         logger.warning(
             "\n" + "=" * 64
             + "\n  请用【小号】的抖音 App 扫码登录"
-            + f"\n  二维码截图: {qr_path}"
-            + "\n  （在服务器上可用 scp / 面板文件管理下载后扫码；"
-            + "\n    二维码约 1 分钟过期、截图每 25 秒自动刷新——【每次扫之前请重新下载最新图】，重复扫旧图会因过期而无效；"
-            + f"\n    {self.settings.qr_timeout}s 内未扫码将超时）"
-            + "\n" + "=" * 64
+            + "\n  链接与操作菜单如下（也可 scp 下载 forwarder_data/login_qr.png）："
         )
+        await self._log_login_links(full=True, reason="扫码登录")
+        await self._log_login_menu(force=True)
+        logger.warning("=" * 64)
 
         # 等待扫码（期间定期重新截取二维码，应对二维码过期刷新）
         deadline = time.monotonic() + self.settings.qr_timeout
@@ -647,26 +1086,27 @@ class DouyinWebReceiver:
                 await self._save_storage_state()
                 return
 
-            # 远程协助：执行 agent_cmd.txt 中的指令（人工介入未知页面用，执行后自动删除）
+            # 远程控制台：执行 agent_cmd.txt 中的输入（编号选项 / 验证码 / 昵称等，执行后自动删除）
             if await self._try_agent_cmd():
                 await self._snapshot_login_page()
 
-            # 抖音风控的「身份验证」页面（异地登录常见）：提示等待人工介入，不作为验证码拦截处理
+            # 抖音风控的「身份验证」页面（异地登录常见）：生成编号菜单等待人工操作
             if await self._has_identity_verification():
-                if not idv_warned:
+                first_time = not idv_warned
+                if first_time:
                     idv_warned = True
                     logger.warning(
-                        "检测到「身份验证」页面（抖音风控要求二次验证，异地登录常见）。\n"
-                        f"  查看当前页面截图: {self.settings.data_dir / 'login_page_state.png'}\n"
-                        f"  远程协助: 在 {self.settings.data_dir / 'agent_cmd.txt'} 写入指令（UTF-8，每行一条，执行后自动删除）\n"
-                        "  指令: click_text 文本 / fill 内容 / type 内容 / press Enter / click x y / drag x1 y1 x2 y2 / wait 秒"
+                        "检测到「身份验证」页面（抖音风控要求二次验证，异地登录常见）——已生成【操作菜单】，见下方。\n"
+                        f"  查看当前页面预览: {self._shot_link('login_page_state.png')}\n"
+                        f"  操作方式: 将菜单编号写入 {self.settings.data_dir / 'agent_cmd.txt'}（如回复 1 表示点击「接收短信验证码」）"
                     )
+                await self._log_login_menu(force=first_time)
             # 其他安全验证（滑块等），无头环境无法完成——留存截图并明确报错
             elif await self._is_captcha_present():
                 await self._snapshot_login_page()
                 raise RuntimeError(
                     "扫码后在浏览器端出现了安全验证页面（滑块等），当前无头环境无法自动完成。\n"
-                    f"页面截图已保存: {self.settings.data_dir / 'login_page_state.png'}（可下载查看）\n"
+                    f"页面截图已保存: {self._shot_link('login_page_state.png')}（可打开查看）\n"
                     "建议: 1) 给服务器加装 VNC（x11vnc）后按部署文档第 4 节方式③用有界面方式登录；"
                     "2) 或更换服务器网络环境后重试（抖音风控与访问 IP 强相关）。"
                 )
@@ -676,6 +1116,9 @@ class DouyinWebReceiver:
                 got_qr = await self._capture_qr(qr_path)
                 await self._snapshot_login_page()
                 logger.info(f"等待扫码中（页面: {page.url}，二维码刷新: {'成功' if got_qr else '失败'}）")
+                # 刷新时重新输出最新截图链接与菜单（旧二维码已过期，必须使用最新一张）
+                await self._log_login_links(reason="自动刷新")
+                await self._log_login_menu()
             await asyncio.sleep(3)
 
         raise TimeoutError(
@@ -706,24 +1149,37 @@ class DouyinWebReceiver:
             logger.warning("登录态失效，重新扫码登录")
             await self.ensure_login()
 
+        # 远程控制台：随时可写输入（设置监测昵称 / 立即轮询 / menu 等，执行后自动删除）
+        try:
+            await self._try_agent_cmd()
+        except Exception as e:
+            logger.warning(f"处理控制台输入异常: {e}")
+
         # 风控拦截检测（节流提示，避免刷屏）
         if await self._is_captcha_present():
             self._warn_captcha_throttled()
             return []
 
         await self._ensure_chat_page()
+        # 防止上一轮打开过的视频仍在播放（自动播放/后台暂停会干扰后续操作）
+        await self._stop_media()
 
         # 刷新聊天页以重新拉取消息数据，并打开目标会话
         payload_ok = await self._refresh_for_payload()
 
         if payload_ok:
             # 接口数据可用：以接口数据为准（视频卡片 itemId + 文本链接）
-            if self.settings.main_account and self._target_conv_id is None and not getattr(self, "_warned_conv_lock", False):
+            account = self.effective_main_account
+            if account and self._target_conv_id is None and not self._warned_conv_lock:
                 self._warned_conv_lock = True
-                logger.warning("未能锁定目标会话 ID（DOUYIN_MAIN_ACCOUNT 是否匹配到会话？），本轮暂按全量扫描")
+                logger.warning(
+                    f"未能锁定目标会话 ID（监测昵称「{account}」是否匹配到会话？"
+                    "可在控制台直接输入新的昵称来更换监测对象），本轮暂按全量扫描"
+                )
             candidates: list[IncomingCandidate] = []
             for fp, url in self._collect_payload_candidates():
                 if self.state.is_seen_message(fp):
+                    self._log_duplicate(fp, f"{url}（此前已识别过的转发）")
                     continue
                 self.state.mark_seen_message(fp)
                 candidates.append(IncomingCandidate(url=url, source="api", msg_fp=fp))
@@ -733,7 +1189,7 @@ class DouyinWebReceiver:
             if not await self._open_main_conversation():
                 logger.warning(
                     "未找到私信会话。请检查：1) 大号是否已给小号发过消息；"
-                    "2) DOUYIN_MAIN_ACCOUNT 是否与大号昵称匹配；"
+                    "2) 监测昵称是否与大号昵称匹配（可在控制台直接输入昵称更新）；"
                     "3) 必要时设置 FORWARDER_DUMP_HTML=true 转储页面排查。"
                 )
                 return []
@@ -823,11 +1279,12 @@ class DouyinWebReceiver:
         target: ElementHandle | None = None
         target_text = ""
 
-        # 1) 按大号昵称匹配
-        if self.settings.main_account:
+        # 1) 按大号昵称匹配（.env 配置值，或控制台对话式设置的昵称）
+        account = self.effective_main_account
+        if account:
             for el in items:
                 text = await self._safe_text(el)
-                if self.settings.main_account in text:
+                if account in text:
                     target, target_text = el, text
                     break
 
@@ -917,7 +1374,10 @@ class DouyinWebReceiver:
                 if links:
                     url = links[0]
                     self.state.mark_seen_message(fp)
-                    if url not in cycle_urls:
+                    vid = video_id_from_url(url)
+                    if vid and self.state.is_video_processed(vid):
+                        self._log_duplicate(f"url:{url}", f"作品已在库（视频 ID {vid}），重复链接不再解析")
+                    elif url not in cycle_urls:
                         cycle_urls.add(url)
                         results.append(IncomingCandidate(url=url, source="text", msg_fp=fp))
                         logger.info(f"发现转发链接: {url}")
@@ -929,7 +1389,10 @@ class DouyinWebReceiver:
                     url, completed = await self._click_extract(item)
                     if url:
                         self.state.mark_seen_message(fp)
-                        if url not in cycle_urls:
+                        vid = video_id_from_url(url)
+                        if vid and self.state.is_video_processed(vid):
+                            self._log_duplicate(f"url:{url}", f"作品已在库（视频 ID {vid}），重复链接不再解析")
+                        elif url not in cycle_urls:
                             cycle_urls.add(url)
                             results.append(IncomingCandidate(url=url, source="card", msg_fp=fp))
                             logger.info(f"从视频卡片提取到链接: {url}")
@@ -1053,6 +1516,8 @@ class DouyinWebReceiver:
                 await popup_page.wait_for_load_state("domcontentloaded", timeout=8000)
             except Exception:
                 pass
+            # 打开的视频页可能立即开始播放：先静音并暂停，再读取地址、关闭
+            await self._stop_media(popup_page)
             url = popup_page.url
             try:
                 await popup_page.close()
@@ -1064,11 +1529,13 @@ class DouyinWebReceiver:
         # 2) 同页跳转（SPA 路由变化）
         now_url = page.url
         if now_url != before_url:
+            await self._stop_media()
             found = self._extract_links(now_url)
             await self._return_to_chat()
             return (found[0] if found else None), True
 
-        # 3) 同页弹层：扫描新出现的视频链接
+        # 3) 同页弹层：扫描新出现的视频链接（弹层里的视频同样先停播）
+        await self._stop_media()
         try:
             anchors = await page.query_selector_all("a[href*='/video/'], a[href*='/note/'], a[href*='v.douyin.com']")
             for a in reversed(anchors[-8:]):
@@ -1109,6 +1576,7 @@ class DouyinWebReceiver:
                 await self._human_delay(1.5, 2.5)
             except Exception as e:
                 logger.debug(f"返回私信页失败: {e}")
+        await self._stop_media()
         self._current_conv_text = None
 
     async def _safe_escape(self) -> None:

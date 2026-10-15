@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
 """去重状态存储（JSON 文件，原子写入）。
 
-记录两类指纹：
-  - processed      ：已经解析/归档过的视频（输入链接与展开后的原始链接各记一次），
-                     防止同一条视频被重复解析；
-  - seen_messages  ：私信里已经识别过的消息（DOM 指纹），避免每轮重复点击同一张视频卡片。
+记录三类指纹/数据：
+  - processed      ：已经解析/归档过的视频（输入链接、展开后的原始链接、视频ID 各记一次），
+                     防止同一条视频被重复解析（重复转发检测的最终防线）；
+  - seen_messages  ：私信里已经识别过的消息（DOM 指纹 / 接口指纹），
+                     避免每轮重复点击/提取同一条转发；
+  - values         ：会话中设置的持久化配置（如通过控制台输入的"监测大号昵称"，
+                     免编辑 .env、免重启）。
 
 文件损坏时自动重命名为 *.corrupt 并从空状态开始，不影响服务启动。
 """
@@ -13,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from pathlib import Path
 
@@ -22,11 +26,32 @@ def fingerprint(text: str, length: int = 20) -> str:
     return hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()[:length]
 
 
+# 抖音链接中的纯数字作品 ID（video/note/slides 路径、modal_id / aweme_id 参数）
+_VIDEO_ID_PATTERNS = (
+    re.compile(r"/(?:video|note|slides)/(\d{10,})"),
+    re.compile(r"(?:modal_id|aweme_id|item_id)=(\d{10,})"),
+)
+
+
+def video_id_from_url(url: str) -> str:
+    """从抖音链接中提取纯数字作品 ID（用于跨链接形式的重复检测）。
+
+    取不到时返回空串（如 v.douyin.com 短链——短链需展开后才知道作品 ID）。
+    """
+    if not url:
+        return ""
+    for pattern in _VIDEO_ID_PATTERNS:
+        m = pattern.search(url)
+        if m:
+            return m.group(1)
+    return ""
+
+
 class StateStore:
     def __init__(self, path: Path, max_entries: int = 5000) -> None:
         self.path = Path(path)
         self.max_entries = max(100, max_entries)
-        self._data: dict[str, dict] = {"processed": {}, "seen_messages": {}, "flags": {}}
+        self._data: dict[str, dict] = {"processed": {}, "seen_messages": {}, "flags": {}, "values": {}}
         self._load()
 
     # ────────────────────────── 持久化 ──────────────────────────
@@ -75,6 +100,30 @@ class StateStore:
             "output": output_dir,
             "at": int(time.time()),
         }
+
+    # ────────────────────────── 作品（视频ID）去重 ──────────────────────────
+    # 说明：同一作品可能以不同链接形式（/video/xx、短链、modal_id）重复转发，
+    # 视频 ID 是唯一稳定标识；本地缓存被清理后该记录依然保留，保证不会重复下载。
+
+    def is_video_processed(self, video_id: str) -> bool:
+        return bool(video_id) and fingerprint("video:" + video_id) in self._data["processed"]
+
+    def mark_video_processed(self, video_id: str, url: str, output_dir: str | None = None) -> None:
+        if not video_id:
+            return
+        self.mark_processed(fingerprint("video:" + video_id), url, output_dir)
+
+    # ────────────────────────── values（会话设置的持久化值） ──────────────────────────
+
+    def get_value(self, key: str, default: str = "") -> str:
+        value = self._data.get("values", {}).get(key)
+        return value if isinstance(value, str) else default
+
+    def set_value(self, key: str, value: str) -> None:
+        self._data.setdefault("values", {})[key] = str(value)
+
+    def clear_value(self, key: str) -> None:
+        self._data.setdefault("values", {}).pop(key, None)
 
     # ────────────────────────── seen_messages ──────────────────────────
 

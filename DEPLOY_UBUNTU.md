@@ -16,7 +16,7 @@
 | 内存 | ≥ 1 GB（Chromium 常驻约 300~500 MB） |
 | 磁盘 | ≥ 2 GB 可用（依赖 + Chromium 约 500 MB，视频归档另计） |
 | 网络 | 服务器需能正常访问 `www.douyin.com`（国内机器最佳，海外 IP 更易触发风控） |
-| 端口 | **无需开放任何入站端口**（服务只做出站请求） |
+| 端口 | 默认**无需开放任何入站端口**（服务只做出站请求）；如需「登录预览链接」功能，可选放行 `8765`（建议仅放行你自己的 IP，或改用 SSH 隧道） |
 | 账号 | 建议使用专门的**小号**，并与大号互相关注 |
 
 > 💡 无需配置 Telegram 相关（`API_ID` / `API_HASH` / `BOT_TOKEN`）：本服务只复用原项目的解析引擎，
@@ -154,11 +154,23 @@ sudo -u douyin -H env DOUYIN_HEADLESS=false \
   /opt/douyin_download_bot/run.py login
 ```
 
-- 二维码自动截图到 `forwarder_data/login_qr.png`（约每 45 秒刷新），下载后用【小号】抖音 App 扫码
+- 二维码自动截图到 `forwarder_data/login_qr.png`（约每 25 秒刷新），下载后用【小号】抖音 App 扫码
   （**用你 ssh 登录服务器的账号**下载，如 root / ubuntu；`douyin` 是服务用户，通常没有 SSH 权限）：
   ```bash
   scp <登录用户>@<服务器IP>:/opt/douyin_download_bot/forwarder_data/login_qr.png .
   ```
+- **免 scp 方式（推荐）**：日志里会直接输出**可点击链接**（内置只读 HTTP 服务，端口 8765），形如
+  `http://<服务器IP>:8765/login_qr.png?t=...` —— 需先在云安全组放行 `8765`（建议只放行你自己的 IP）。
+  若不想开端口：本地执行 `ssh -L 8765:127.0.0.1:8765 <登录用户>@<服务器IP>`，再访问 `http://127.0.0.1:8765/`（每 15 秒自动刷新）。
+  **AWS 等 NAT 实例**请把公网 IP 写进 `.env` 的 `FORWARDER_SHOT_HOST`（如 `FORWARDER_SHOT_HOST=54.153.141.184`），否则链接里可能是内网地址。
+- **出现「身份验证」页怎么办**：日志会给出【登录操作菜单】（编号选项），把编号写进指令文件即可代点（无需记任何指令）：
+  ```bash
+  echo 1 | sudo tee /opt/douyin_download_bot/forwarder_data/agent_cmd.txt        # 例：点击「接收短信验证码」
+  echo 123456 | sudo tee /opt/douyin_download_bot/forwarder_data/agent_cmd.txt   # 收到短信后：自动填入
+  echo "123456 go" | sudo tee /opt/douyin_download_bot/forwarder_data/agent_cmd.txt  # 填入并回车提交（一条完成）
+  ```
+  ⏱ 时间提醒：二维码约 1 分钟过期（截图每 25 秒自动刷新，日志每次刷新都会重新输出最新链接）；
+  短信验证码官方限制约 60 秒一次、有效期约 5 分钟（连续获取时服务会提示冷却剩余秒数）。
 - 扫码窗口默认 300 秒；**超时会自动重开新窗口，可以继续扫到成功为止**。想更从容可先调大窗口：
   ```bash
   sudo sed -i 's/^DOUYIN_QR_TIMEOUT=.*/DOUYIN_QR_TIMEOUT=900/' /opt/douyin_download_bot/.env
@@ -232,14 +244,19 @@ sudo systemctl status douyin-forward       # 状态
 | 更新解析能力 | `sudo -u douyin git -C /opt/douyin_download_bot/parse_hub_bot pull origin main`（git 子模块，解析链路随上游升级） |
 | 更新转发链路代码 | 服务器：`sudo -u douyin git -C /opt/douyin_download_bot pull && sudo systemctl restart douyin-forward`；或本地修改后重新打包上传覆盖（保留 `.env` 与 `forwarder_data/`） |
 | 重置解析记录 | `rm forwarder_data/state.json && sudo systemctl restart douyin-forward` |
+| 更换监测昵称（免重启） | `echo "新昵称" \| sudo tee /opt/douyin_download_bot/forwarder_data/agent_cmd.txt`（`echo reset \| sudo tee ...` 恢复 `.env` 默认值） |
+| 登录/验证期间远程操作 | `echo 1 \| sudo tee .../forwarder_data/agent_cmd.txt` 点击菜单第 1 项；`echo 123456 \| sudo tee ...` 填验证码（详见 README「远程控制台」） |
 | 重置登录态 | `rm -rf forwarder_data/browser_profile && sudo systemctl restart douyin-forward`（需重新登录） |
 | 备份登录态 | 定期打包 `forwarder_data/browser_profile/` 留存，登录失效时可快速恢复 |
 | 设置时区 | `sudo timedatectl set-timezone Asia/Shanghai`（日志时间更直观，可选） |
 
-### 磁盘管理
+### 磁盘管理（现已默认自动）
 
 - `forwarder_data/downloads/` 是解析临时目录，**自动清理**，目录为空属正常；
-- 视频归档在 `output/` 下，**不会自动清理**，请定期整理 / 转移；
+- `output/` 归档：**TG 推送成功即自动删除本地副本**（`FORWARDER_CLEANUP_AFTER_PUSH=true`，仅当推送启用且成功时）；
+  其余内容按 `FORWARDER_CACHE_TTL_HOURS`（默认 **72 小时**）定时清理（每小时检查一次，启动时也先清理一次）；
+- 不用 TG 推送、想长期保留归档：设 `FORWARDER_CACHE_TTL_HOURS=0` 关闭定时清理；
+- 清理**不影响去重**：`state.json` 保存视频 ID 指纹，重复转发照常跳过，不会重新下载；
 - 日志自动滚动（单文件 10 MB）。
 
 ---
@@ -253,7 +270,9 @@ sudo systemctl status douyin-forward       # 状态
 | 日志提示「profile 被占用」 | 有其它进程在使用 `forwarder_data/browser_profile`：`sudo systemctl stop douyin-forward`，`pkill -f run.py`，再重试 |
 | 登录命令报 profile 被占用 | 服务正在运行占用了 profile：`sudo systemctl stop douyin-forward` 后登录，登录完成再 `sudo systemctl start douyin-forward` |
 | 提示「验证码中间页」 | 在服务器上以有界面方式扫码（第 4 节方式 ①/②），或间隔一段时间/换网络环境重试；**注意登录态不能跨机器复制**（原因见第 4 节警告框） |
-| 提示「未找到私信会话」 | 检查 `.env` 的 `DOUYIN_MAIN_ACCOUNT` 是否与大号昵称匹配；确认大号已给小号发过消息；开 `FORWARDER_DUMP_HTML=true` 重启查看转储 HTML |
+| 提示「未找到私信会话」 | 检查监测昵称是否与大号昵称匹配（也可直接 `echo "大号昵称" \| sudo tee .../agent_cmd.txt` 即时更换）；确认大号已给小号发过消息；开 `FORWARDER_DUMP_HTML=true` 重启查看转储 HTML |
+| 预览链接（8765）打不开 | ① 云安全组未放行 8765（建议仅放行自己 IP）；② AWS 等 NAT 实例未设 `FORWARDER_SHOT_HOST`（自动探测到内网 IP）；③ 或改用 SSH 隧道：`ssh -L 8765:127.0.0.1:8765 <用户>@<服务器IP>` 后访问 `http://127.0.0.1:8765/` |
+| 日志出现「检测到重复，已跳过」 | 正常行为：该作品此前已处理过（重复转发 / 不同链接指向同一视频）。如需重新处理，删除 `state.json` 后重启 |
 | 转发后没解析 | 首次启动只记录"水位"，只处理**启动之后**新转发的视频；想处理历史：设 `DOUYIN_PROCESS_HISTORY=true` 并删除 `state.json` 后重启 |
 | 解析失败（自动重试 3 次后放弃） | 查看日志中的具体错误；抖音解析偶发失败可把该视频重新转发一次触发重试 |
 | xvfb 登录时二维码扫不了 | 确认 `forwarder_data/login_qr.png` 在持续更新（每 ~45s 刷新）；重新执行登录命令 |
@@ -263,7 +282,9 @@ sudo systemctl status douyin-forward       # 状态
 
 ## 9. 安全与合规
 
-- 服务只发出请求，无需开放任何入站端口，**请不要**将调试端口暴露到公网；
+- 服务默认只发出请求、无需入站端口；「登录预览链接」会监听 `8765`（**只读**、仅白名单截图/菜单文件，不含登录态），
+  如启用请仅在安全组放行**你自己的 IP**，登录完成后可用 `FORWARDER_SHOT_PORT=0` 关闭；
+  ⚠️ 二维码等同登录凭证，切勿把预览端口暴露给公网所有人；
 - 服务以普通用户（默认 `douyin`）运行，项目目录归属该用户，遵循最小权限；
 - 使用自动化操作自己的账号存在平台风控风险，**请使用专门小号**并保持默认的保守频率（轮询 20s / 解析间隔 8s）；
 - 请遵守抖音用户协议，仅用于个人保存自己账号可访问的内容。

@@ -18,7 +18,9 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import time
+from pathlib import Path
 from typing import Any
 
 from log import logger
@@ -27,13 +29,79 @@ from .config import ForwarderSettings
 from .douyin_web import DouyinWebReceiver
 from .parser_bridge import parse_url
 from .reporter import LogStatusReporter
-from .state import StateStore, fingerprint
+from .state import StateStore, fingerprint, video_id_from_url
 from .tg_push import TgPusher
 
 logger = logger.bind(name="Forwarder/Main")
 
 # 同一链接最多重试次数，超过后放弃并记录
 MAX_PARSE_ATTEMPTS = 3
+
+# 定时缓存清理的执行间隔（秒）；实际保留时长由 FORWARDER_CACHE_TTL_HOURS 决定
+CACHE_SWEEP_INTERVAL = 3600
+
+
+def _remove_cache_dir(output_root: Path, target: Path) -> bool:
+    """安全删除归档目录：仅允许删除 output_root 内部的目录（防止误删）。"""
+    try:
+        root = output_root.resolve()
+        t = target.resolve()
+        if root in t.parents and t.is_dir():
+            shutil.rmtree(t)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def sweep_cache(settings: ForwarderSettings, *, ttl_hours: float | None = None) -> None:
+    """定时清理本地缓存：output/ 作品目录、debug/ 转储、downloads/ 残留。
+
+    - 只删除"最后修改时间超过保留时长"的内容（正在处理的目录 mtime 是新的，不受影响）；
+    - 已处理记录保存在 state.json（含视频 ID 指纹），缓存删除后也不会重复下载。
+    """
+    ttl = settings.cache_ttl_hours if ttl_hours is None else ttl_hours
+    if ttl <= 0:
+        return
+    cutoff = time.time() - ttl * 3600
+    removed_dirs = removed_files = 0
+
+    def _is_old(p: Path) -> bool:
+        try:
+            return p.stat().st_mtime < cutoff
+        except Exception:
+            return False
+
+    # 1) output/ 作品归档目录
+    try:
+        for entry in settings.output_dir.iterdir():
+            if entry.is_dir() and _is_old(entry) and _remove_cache_dir(settings.output_dir, entry):
+                removed_dirs += 1
+    except Exception:
+        pass
+
+    # 2) debug/ HTML 转储
+    try:
+        for f in settings.debug_dir.glob("*.html"):
+            if _is_old(f):
+                f.unlink(missing_ok=True)
+                removed_files += 1
+    except Exception:
+        pass
+
+    # 3) downloads/ 残留目录（正常情况下原项目会自行清理，异常退出时兜底）
+    try:
+        for entry in (settings.data_dir / "downloads").iterdir():
+            if entry.is_dir() and _is_old(entry):
+                shutil.rmtree(entry, ignore_errors=True)
+                removed_dirs += 1
+    except Exception:
+        pass
+
+    if removed_dirs or removed_files:
+        logger.info(f"🧹 缓存清理: 删除 {removed_dirs} 个目录 / {removed_files} 个转储文件（保留最近 {ttl:g} 小时）")
+    else:
+        logger.debug(f"缓存清理: 无需处理（保留最近 {ttl:g} 小时）")
 
 
 # ══════════════════════════ 模式一：常驻服务 ══════════════════════════
@@ -56,6 +124,17 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
     reporter = LogStatusReporter("Pipeline")
     pusher = TgPusher(settings)
 
+    override = state.get_value("main_account")
+    if override:
+        logger.info(
+            f"监测昵称使用「控制台设置」值: {override}"
+            f"（.env 默认: {settings.main_account or '未设置'}；控制台输入 reset 可恢复默认）"
+        )
+
+    # 启动时先做一次缓存清理（清掉上次运行留下的过期内容）
+    if settings.cache_ttl_hours > 0:
+        sweep_cache(settings)
+
     await receiver.start()
     if settings.tg_push:
         await pusher.start()
@@ -63,6 +142,7 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
         logger.info("启动完成（--once：只执行一轮轮询）")
 
     last_parse_ts = 0.0
+    last_sweep = time.monotonic()
     try:
         while True:
             cycle_start = time.monotonic()
@@ -76,6 +156,12 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
                 fp = fingerprint(cand.url)
                 if state.is_processed(fp) or state.is_gave_up(fp):
                     logger.debug(f"已处理/已放弃，跳过: {cand.url}")
+                    continue
+
+                # 作品级重复检测：同一视频换链接/换消息重复转发时也跳过
+                vid = video_id_from_url(cand.url)
+                if vid and state.is_video_processed(vid):
+                    logger.info(f"检测到重复作品（视频 ID {vid} 已处理过），跳过: {cand.url}")
                     continue
 
                 # 与上一次解析保持最小间隔，避免请求过于频繁
@@ -104,12 +190,21 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
                         state.mark_processed(
                             fingerprint(outcome.raw_url), outcome.raw_url, str(outcome.archive.dir)
                         )
+                    # 作品级去重记录（含展开后链接里的视频 ID）
+                    for video_url in {outcome.raw_url or cand.url, cand.url}:
+                        video_id = video_id_from_url(video_url)
+                        if video_id:
+                            state.mark_video_processed(video_id, video_url, str(outcome.archive.dir))
                     state.clear_failures(fp)
                     logger.success(
                         f"解析完成 ✅ 已归档: {outcome.archive.dir} "
                         f"（{len(outcome.archive.files)} 个文件）"
                         + ("，已推送至 Telegram" if outcome.push_ok else "")
                     )
+                    # 推送成功 → 按配置删除本地缓存（媒体已在 Telegram，无需保留副本）
+                    if settings.cleanup_after_push and outcome.push_ok:
+                        if _remove_cache_dir(settings.output_dir, outcome.archive.dir):
+                            logger.info(f"🧹 推送成功，已删除本地缓存: {outcome.archive.dir.name}")
                 else:
                     error = (
                         "解析与归档成功，但 Telegram 推送失败（下一轮自动重试）"
@@ -135,9 +230,22 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
                 return
 
             elapsed = time.monotonic() - cycle_start
-            wait = max(1.0, settings.poll_interval - elapsed)
-            logger.debug(f"本轮结束（耗时 {elapsed:.1f}s），{wait:.0f}s 后进入下一轮")
-            await asyncio.sleep(wait)
+            if receiver.consume_force_poll():
+                logger.info("控制台触发：立即执行下一轮检查")
+                await asyncio.sleep(1.0)
+            else:
+                wait = max(1.0, settings.poll_interval - elapsed)
+                logger.debug(f"本轮结束（耗时 {elapsed:.1f}s），{wait:.0f}s 后进入下一轮")
+                await asyncio.sleep(wait)
+
+            # 定时缓存清理（默认每小时检查一次；保留时长见 FORWARDER_CACHE_TTL_HOURS）
+            now = time.monotonic()
+            if settings.cache_ttl_hours > 0 and now - last_sweep >= CACHE_SWEEP_INTERVAL:
+                last_sweep = now
+                try:
+                    sweep_cache(settings)
+                except Exception as e:
+                    logger.debug(f"缓存清理异常（忽略）: {e}")
     finally:
         await pusher.stop()
         await receiver.close()
