@@ -12,7 +12,12 @@
 #   2. 创建虚拟环境 .venv 并安装 requirements-forwarder.txt
 #      （默认腾讯云 PyPI 镜像，失败自动回退官方源）
 #   3. 安装 Playwright Chromium 浏览器
-#   4. 生成 .env（若不存在）并安装 systemd 服务（不自动启动）
+#   4. 生成 .env（若不存在），并交互式选择监测模式：单会话 / 多会话（可输入多个昵称）
+#   5. 安装 systemd 服务（不自动启动）
+#
+# 非交互式部署可用环境变量预设监测配置：
+#   MONITOR_MODE=single MONITOR_ACCOUNTS="我的大号"  bash deploy/install_ubuntu.sh
+#   MONITOR_MODE=multi  MONITOR_ACCOUNTS="小明,小红" bash deploy/install_ubuntu.sh
 #
 # 完成后请按脚本末尾提示，先完成首次登录，再启动服务。
 # ============================================================
@@ -134,12 +139,19 @@ run_as_app "$VENV_DIR/bin/playwright" install chromium
 
 if [ ! -f "$PROJECT_DIR/.env" ]; then
   cp "$PROJECT_DIR/.env.example" "$PROJECT_DIR/.env"
-  warn "已生成 $PROJECT_DIR/.env —— 请编辑并填写 DOUYIN_MAIN_ACCOUNT（大号昵称关键字）"
+  log "已生成 $PROJECT_DIR/.env"
 else
   log "已存在 .env，保持不变"
 fi
 
 mkdir -p "$PROJECT_DIR/forwarder_data" "$PROJECT_DIR/output"
+
+# 交互式选择监测模式：单会话 / 多会话（输入大号昵称，写入 .env）
+# （非交互式环境自动跳过；可用 MONITOR_MODE / MONITOR_ACCOUNTS 环境变量预设）
+if ! bash "$SCRIPT_DIR/configure_accounts.sh"; then
+  warn "监测账号配置未完成 —— 可稍后运行: bash $PROJECT_DIR/deploy/configure_accounts.sh"
+fi
+
 if [ "$(id -u)" -eq 0 ]; then
   chown -R "$RUN_AS:$RUN_AS" "$PROJECT_DIR"
 fi
@@ -174,7 +186,8 @@ cat <<EOF
 
    方式 A（推荐）：在服务器上跑一次登录命令，二维码自动截图
      sudo -u $RUN_AS -H env DOUYIN_HEADLESS=false /usr/bin/xvfb-run -a $VENV_DIR/bin/python $PROJECT_DIR/run.py login
-     # 二维码（约 45 秒刷新）：$PROJECT_DIR/forwarder_data/login_qr.png
+     # 二维码（约 25 秒刷新）：$PROJECT_DIR/forwarder_data/login_qr.png
+     # 也可直接打开日志里的"预览链接"查看（默认端口 8765，安全组放行或 SSH 隧道）
      # 下载（<登录用户> = 你 ssh 登录服务器的账号，如 root / ubuntu）：
      #   scp <登录用户>@<server>:$PROJECT_DIR/forwarder_data/login_qr.png .
      # 超时会自动重开新窗口继续扫；如需更长窗口：在 .env 设 DOUYIN_QR_TIMEOUT=900
@@ -187,6 +200,8 @@ cat <<EOF
 
  其他：
    编辑配置     : $PROJECT_DIR/.env
+   重配监测账号 : sudo bash $PROJECT_DIR/deploy/configure_accounts.sh   # 单会话 / 多会话交互选择
+   运行中换账号 : echo "新昵称" | sudo tee $PROJECT_DIR/forwarder_data/agent_cmd.txt   # 免重启即时生效
    重启服务     : sudo systemctl restart $SERVICE_NAME
    更新浏览器   : sudo -u $RUN_AS -H $VENV_DIR/bin/playwright install chromium
    详细说明     : 见项目根目录 DEPLOY_UBUNTU.md 与 README.md

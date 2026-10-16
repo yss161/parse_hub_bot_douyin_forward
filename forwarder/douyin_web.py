@@ -52,7 +52,7 @@ from playwright.async_api import (
     async_playwright,
 )
 
-from .config import ForwarderSettings
+from .config import ForwarderSettings, split_accounts
 from .shot_server import ShotServer
 from .state import StateStore, fingerprint, video_id_from_url
 
@@ -209,8 +209,8 @@ class DouyinWebReceiver:
         self._msg_payloads: list[tuple[float, str]] = []
         # 接口请求中出现的会话 ID（时间戳, ID），用于锁定「指定会话」
         self._conv_id_events: list[tuple[float, str]] = []
-        # 锁定后的目标会话 ID（只处理该会话内的消息数据）
-        self._target_conv_id: str | None = None
+        # 锁定后的目标会话 ID 集合（多会话监测：只处理这些会话内的消息数据）
+        self._target_conv_ids: set[str] = set()
         # 登录截图/菜单的只读 HTTP 服务（日志中输出可点击链接用）
         self._shots: ShotServer | None = None
         # 登录页当前可点击选项（编号菜单）：[(label, note)]
@@ -370,13 +370,13 @@ class DouyinWebReceiver:
         - 分享卡片：itemId -> https://www.douyin.com/video/{itemId}
         - 文本消息：正文中的抖音链接（正则）
 
-        已锁定目标会话时，只提取该会话段内的内容（其他会话/群聊的分享会被忽略）。
+        已锁定目标会话时，只提取这些会话段内的内容（其他会话/群聊的分享会被忽略）。
         已处理过的作品（视频 ID 级去重）在这里直接跳过，避免重复解析。
         """
         found: dict[str, str] = {}
         for _ts, text in self._msg_payloads:
             for marker, chunk in self._split_payload_sections(text):
-                if self._target_conv_id and marker != self._target_conv_id:
+                if self._target_conv_ids and marker not in self._target_conv_ids:
                     continue
                 for m in MESSAGE_ITEM_ID_RE.finditer(chunk):
                     item_id = m.group(1)
@@ -413,9 +413,9 @@ class DouyinWebReceiver:
         return sections
 
     async def _refresh_for_payload(self) -> bool:
-        """刷新聊天页（触发消息接口重新拉取最新消息）并打开目标会话。
+        """刷新聊天页（触发消息接口重新拉取最新消息）并打开目标会话（支持多个）。
 
-        期间从接口请求中锁定「目标会话 ID」，供候选提取时按会话过滤。
+        期间从接口请求中锁定「目标会话 ID 集合」，供候选提取时按会话过滤。
         返回 True 表示本轮捕获到了较新的接口数据。
         """
         page = self._page
@@ -427,21 +427,11 @@ class DouyinWebReceiver:
         self._current_conv_text = None
         await self._human_delay(3.5, 5.0)
 
-        # 打开目标会话（触发该会话的消息接口；此时捕获到的会话 ID 即为目标）
-        n_before = len(self._conv_id_events)
+        # 逐个打开目标会话（触发这些会话的消息接口；点击后新出现的会话 ID 即为目标）
         try:
-            await self._open_main_conversation()
-        except Exception:
-            pass
-        await self._human_delay(2.0, 3.0)
-
-        after = [cid for _ts, cid in self._conv_id_events[n_before:]]
-        if after:
-            target = after[-1]
-            if target != self._target_conv_id:
-                name = (self._current_conv_text or "").split("\n")[0][:24]
-                logger.info(f"已锁定目标会话，仅处理该会话内的转发: {name}（ID: {target}）")
-            self._target_conv_id = target
+            await self._open_and_lock_conversations()
+        except Exception as e:
+            logger.debug(f"打开目标会话异常（继续）: {e}")
 
         now = time.monotonic()
         return any(now - ts <= 30 for ts, _ in self._msg_payloads)
@@ -680,11 +670,11 @@ class DouyinWebReceiver:
             old = self.state.get_value("main_account")
             self.state.clear_value("main_account")
             self.state.save()
-            self._target_conv_id = None
+            self._target_conv_ids.clear()
             self._current_conv_text = None
             self._warned_conv_lock = False
             logger.success(
-                f"✅ 已清除自定义监测昵称（原值: {old or '(无)'}），恢复 .env 默认值: "
+                f"✅ 已清除自定义监测账号（原值: {old or '(无)'}），恢复 .env 默认值: "
                 f"{self.settings.main_account or '(未设置，自动选择会话)'}"
             )
             return True
@@ -739,17 +729,36 @@ class DouyinWebReceiver:
                     await self._click_login_option(label)
                     return True
 
-        # 9) 其它纯文本 = 设置"监测的大号昵称"（对话式添加，免指令、免重启）
-        name = line.strip()
-        if not name or len(name) > 60:
-            raise RuntimeError("无法识别的输入（昵称长度需 1~60 字符）")
-        self.state.set_value("main_account", name)
+        # 9) 其它纯文本 = 设置"监测账号"（支持多个；对话式添加，免指令、免重启）
+        raw = line.strip()
+        if not raw or len(raw) > 200:
+            raise RuntimeError("无法识别的输入（长度需 1~200 字符）")
+
+        current = self.effective_main_accounts
+        if raw.startswith("+"):
+            names = split_accounts(raw[1:])
+            if not names:
+                raise RuntimeError("追加格式：+昵称（多个用逗号分隔，如 +小明,小红）")
+            new_list = current + [n for n in names if n not in current]
+            action = f"追加 {'、'.join(names)}"
+        elif raw.startswith("-"):
+            names = split_accounts(raw[1:])
+            if not names:
+                raise RuntimeError("移除格式：-昵称（多个用逗号分隔，如 -小明,小红）")
+            new_list = [n for n in current if n not in names]
+            action = f"移除 {'、'.join(names)}"
+        else:
+            new_list = split_accounts(raw)
+            action = "设置"
+
+        self.state.set_value("main_account", ", ".join(new_list))
         self.state.save()
-        self._target_conv_id = None
+        self._target_conv_ids.clear()
         self._current_conv_text = None
         self._warned_conv_lock = False
+        shown = "、".join(new_list) or "(空：自动选择会话)"
         logger.success(
-            f"✅ 已将「监测的大号昵称」更新为: {name}（免重启，下一轮轮询即按新昵称定位会话；"
+            f"✅ 已{action}监测账号，当前 {len(new_list)} 个: {shown}（免重启，下一轮轮询即生效；"
             "输入 reset 可恢复 .env 默认值）"
         )
         return True
@@ -911,7 +920,7 @@ class DouyinWebReceiver:
                 lines.append(f"  回复 {i}  → 点击「{label}」{suffix}")
         lines += [
             "  输入 6 位验证码（如 123456）→ 自动填入；输入 `123456 go` → 填入并回车提交",
-            "  输入菜单以外的文本 → 设为「监测的大号昵称」（免重启即时生效）",
+            "  输入菜单以外的文本 → 设为监测账号（多个用逗号分隔；+追加、-移除，免重启即时生效）",
             "  ⏱ 刷新时间提醒：二维码约 1 分钟过期（本服务每 25 秒自动刷新截图）；",
             f"     短信验证码官方限制约 {SMS_COOLDOWN_SECONDS} 秒一次、有效期约 5 分钟，请勿频繁重发",
             f"  回复方式：把编号或内容写入 {self.settings.data_dir / 'agent_cmd.txt'}（UTF-8，执行后自动删除）",
@@ -926,12 +935,14 @@ class DouyinWebReceiver:
 
     def _log_console_help(self) -> None:
         """日常运行时的控制台使用说明（无登录菜单时）。"""
-        account = self.effective_main_account or "(未设置：自动选择会话)"
+        accounts = self.effective_main_accounts
+        shown = "、".join(accounts) if accounts else "(未设置：自动选择会话)"
         lines = [
             "【远程控制台】使用说明",
-            f"  当前监测的大号昵称: {account}",
-            "  任意文本（如：我的大号）→ 设为监测的大号昵称（免重启，立即生效）",
-            "  reset / 重置        → 清除自定义昵称，恢复 .env 默认值",
+            f"  当前监测账号（{len(accounts)} 个）: {shown}",
+            "  任意文本（如：我的大号）→ 设为监测账号；多个用逗号分隔（如：小明,小红）",
+            "  +昵称 / -昵称        → 追加 / 移除一个监测账号（多个用逗号分隔）",
+            "  reset / 重置        → 清除自定义账号，恢复 .env 默认值",
             "  force / now / 立即  → 不等待轮询周期，立刻执行下一轮检查",
             "  菜单 / help         → 重新显示本说明",
             "  纯数字验证码(4~8位)  → 登录流程中填入验证码输入框；`123456 go` = 填入并回车",
@@ -996,9 +1007,10 @@ class DouyinWebReceiver:
     # ────────────── 会话设置的大号昵称 ──────────────
 
     @property
-    def effective_main_account(self) -> str:
-        """当前生效的监测大号昵称：会话设置值优先，其次 .env 配置。"""
-        return self.state.get_value("main_account") or self.settings.main_account
+    def effective_main_accounts(self) -> list[str]:
+        """当前生效的监测账号列表：会话设置值优先，其次 .env 配置（支持多个）。"""
+        raw = self.state.get_value("main_account") or self.settings.main_account
+        return split_accounts(raw)
 
     def consume_force_poll(self) -> bool:
         """取出并清除"立即执行下一轮"标记（供主循环使用）。"""
@@ -1169,11 +1181,11 @@ class DouyinWebReceiver:
 
         if payload_ok:
             # 接口数据可用：以接口数据为准（视频卡片 itemId + 文本链接）
-            account = self.effective_main_account
-            if account and self._target_conv_id is None and not self._warned_conv_lock:
+            accounts = self.effective_main_accounts
+            if accounts and not self._target_conv_ids and not self._warned_conv_lock:
                 self._warned_conv_lock = True
                 logger.warning(
-                    f"未能锁定目标会话 ID（监测昵称「{account}」是否匹配到会话？"
+                    f"未能锁定目标会话 ID（监测昵称 {'、'.join(accounts)} 是否匹配到会话？"
                     "可在控制台直接输入新的昵称来更换监测对象），本轮暂按全量扫描"
                 )
             candidates: list[IncomingCandidate] = []
@@ -1185,15 +1197,26 @@ class DouyinWebReceiver:
                 candidates.append(IncomingCandidate(url=url, source="api", msg_fp=fp))
                 logger.info(f"从消息数据中发现转发链接: {url}")
         else:
-            # 回退：DOM 扫描（消息接口未捕获时）
-            if not await self._open_main_conversation():
+            # 回退：DOM 扫描（消息接口未捕获时）——逐个打开监测会话扫描
+            items = await self._conversation_items()
+            matched = await self._match_conversation_items(items)
+            if not matched:
                 logger.warning(
                     "未找到私信会话。请检查：1) 大号是否已给小号发过消息；"
                     "2) 监测昵称是否与大号昵称匹配（可在控制台直接输入昵称更新）；"
                     "3) 必要时设置 FORWARDER_DUMP_HTML=true 转储页面排查。"
                 )
                 return []
-            candidates = await self._scan_messages()
+            candidates = []
+            for el, text in matched[:10]:
+                try:
+                    await el.click()
+                    await self._human_delay(1.2, 2.5)
+                    self._current_conv_text = text
+                except Exception as e:
+                    logger.debug(f"打开会话失败（跳过）: {e}")
+                    continue
+                candidates.extend(await self._scan_messages())
 
         # 首次运行：默认仅记录当前消息水位（避免把服务启动前的旧转发全部解析）；
         # 设置 DOUYIN_PROCESS_HISTORY=true 可改为处理历史消息。
@@ -1269,50 +1292,66 @@ class DouyinWebReceiver:
                 return result
         return items
 
-    async def _open_main_conversation(self) -> bool:
+    async def _match_conversation_items(self, items: list[ElementHandle]) -> list[tuple[ElementHandle, str]]:
+        """挑出需要监测的会话（支持多个）：
+
+        1) 按监测昵称列表匹配（名称包含即命中，可同时命中多个会话）；
+        2) 未匹配到时取有未读角标的会话（最多 3 个）；
+        3) 仍未匹配到则退回第一条会话（保持旧行为）。
+        """
+        accounts = self.effective_main_accounts
+        matched: list[tuple[ElementHandle, str]] = []
+        if accounts:
+            for el in items:
+                text = await self._safe_text(el)
+                if any(name in text for name in accounts):
+                    matched.append((el, text))
+        if not matched:
+            for el in items:
+                if await self._has_unread(el):
+                    matched.append((el, await self._safe_text(el)))
+                    if len(matched) >= 3:
+                        break
+        if not matched and items:
+            matched.append((items[0], await self._safe_text(items[0])))
+        return matched
+
+    async def _open_and_lock_conversations(self) -> None:
+        """逐个打开监测会话，并把它们的会话 ID 加入锁定集合。
+
+        消息接口数据按会话切段（`#会话ID`），锁定集合即"只提取这些会话段"的过滤条件，
+        其他会话/群聊的分享一律忽略。每次点击后取"新出现的最后一个会话 ID"作为该会话的 ID。
+        """
         page = self._page
         assert page is not None
         items = await self._conversation_items()
         if not items:
-            return False
+            return
+        matched = await self._match_conversation_items(items)
 
-        target: ElementHandle | None = None
-        target_text = ""
+        newly_locked: list[tuple[str, str]] = []
+        for el, text in matched[:10]:
+            n_before = len(self._conv_id_events)
+            try:
+                await el.click()
+            except Exception as e:
+                logger.debug(f"点击会话失败（跳过该会话）: {e}")
+                continue
+            await self._human_delay(1.5, 2.5)
+            self._current_conv_text = text
+            after = [cid for _ts, cid in self._conv_id_events[n_before:]]
+            if not after:
+                continue
+            cid = after[-1]
+            if cid not in self._target_conv_ids:
+                self._target_conv_ids.add(cid)
+                newly_locked.append((text.split("\n")[0][:24], cid))
 
-        # 1) 按大号昵称匹配（.env 配置值，或控制台对话式设置的昵称）
-        account = self.effective_main_account
-        if account:
-            for el in items:
-                text = await self._safe_text(el)
-                if account in text:
-                    target, target_text = el, text
-                    break
-
-        # 2) 有未读角标的会话
-        if target is None:
-            for el in items:
-                if await self._has_unread(el):
-                    target, target_text = el, await self._safe_text(el)
-                    break
-
-        # 3) 第一条会话
-        if target is None:
-            target = items[0]
-            target_text = await self._safe_text(target)
-
-        # 已打开则跳过
-        if self._current_conv_text and target_text and self._current_conv_text == target_text:
-            return True
-
-        try:
-            await target.click()
-        except Exception as e:
-            logger.warning(f"点击会话失败: {e}")
-            return False
-        await self._human_delay(1.2, 2.5)
-        self._current_conv_text = target_text
-        logger.debug(f"已打开会话: {target_text[:40]!r}")
-        return True
+        if newly_locked:
+            detail = "；".join(f"{n}（ID: {c}）" for n, c in newly_locked)
+            logger.info(
+                f"已锁定 {len(self._target_conv_ids)} 个目标会话，仅处理这些会话内的转发: {detail}"
+            )
 
     async def _has_unread(self, item: ElementHandle) -> bool:
         for sel in UNREAD_BADGE_SELECTORS:

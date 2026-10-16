@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -21,6 +22,16 @@ FORWARDER_DATA_DIR = ROOT_DIR / "forwarder_data"
 # 加载配置：先根目录 .env，再 forwarder/.env（均不覆盖已存在的环境变量）
 load_dotenv(ROOT_DIR / ".env")
 load_dotenv(ROOT_DIR / "forwarder" / ".env")
+
+# 监测昵称列表的分隔符（兼容中英文逗号 / 分号 / 换行）
+_ACCOUNT_SEP_RE = re.compile(r"[,，;；\n]+")
+
+
+def split_accounts(raw: str) -> list[str]:
+    """把"监测昵称"配置拆分为列表（自动去空白；支持多个用户同时监测）。"""
+    if not raw:
+        return []
+    return [p.strip() for p in _ACCOUNT_SEP_RE.split(raw) if p.strip()]
 
 
 def _env(name: str, default: str = "") -> str:
@@ -57,9 +68,14 @@ class ForwarderSettings:
     """转发链路设置。"""
 
     # ─────────────── 抖音端（小号/接收） ───────────────
-    # 大号昵称关键字：用于在私信会话列表中定位"大号 → 小号"的会话；
+    # 监测的大号昵称：用于在私信会话列表中定位"大号 → 小号"的会话；
+    # 支持【多个】（英文/中文逗号、分号或换行分隔）→ 同时监测多个聊天用户/会话：
+    #   DOUYIN_MAIN_ACCOUNT=我的大号
+    #   DOUYIN_MAIN_ACCOUNTS=小明,小红        ← 多会话写法（优先于单数形式）
     # 留空时自动选择"有未读角标"的会话，否则选第一条会话。
-    main_account: str = field(default_factory=lambda: _env("DOUYIN_MAIN_ACCOUNT"))
+    main_account: str = field(
+        default_factory=lambda: _env("DOUYIN_MAIN_ACCOUNTS") or _env("DOUYIN_MAIN_ACCOUNT")
+    )
     chat_url: str = field(default_factory=lambda: _env("DOUYIN_CHAT_URL", "https://www.douyin.com/chat?isPopup=1"))
     home_url: str = field(default_factory=lambda: _env("DOUYIN_HOME_URL", "https://www.douyin.com"))
     headless: bool = field(default_factory=lambda: _env_bool("DOUYIN_HEADLESS", True))
@@ -117,10 +133,22 @@ class ForwarderSettings:
         for p in (self.data_dir, self.browser_profile_dir, self.output_dir, self.debug_dir):
             p.mkdir(parents=True, exist_ok=True)
 
+    @property
+    def main_accounts(self) -> list[str]:
+        """监测昵称列表（拆分后的结果；为空表示未设置、自动选择会话）。"""
+        return split_accounts(self.main_account)
+
     def describe(self) -> str:
+        accounts = self.main_accounts
+        if not accounts:
+            account_desc = "(未设置，自动选择会话)"
+        elif len(accounts) == 1:
+            account_desc = accounts[0]
+        else:
+            account_desc = f"多会话（{len(accounts)} 个）→ {'、'.join(accounts)}"
         lines = [
             "当前配置:",
-            f"  大号昵称关键字   : {self.main_account or '(未设置，自动选择会话)'}",
+            f"  监测账号         : {account_desc}",
             f"  聊天页地址       : {self.chat_url}",
             f"  无头模式         : {self.headless}",
             f"  轮询间隔         : {self.poll_interval}s",

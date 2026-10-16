@@ -85,8 +85,38 @@ sudo APP_USER=douyin bash deploy/install_ubuntu.sh
 2. 检测 Python ≥ 3.12（不足则自动装 `python3.12`）；
 3. 创建虚拟环境 `.venv`，安装 `requirements-forwarder.txt`（默认**腾讯云 PyPI 镜像**，失败自动回退官方源）；
 4. 安装 Playwright Chromium 浏览器；
-5. 生成 `.env`（若不存在）并安装 systemd 服务 `douyin-forward`（**安装但不启动**）；
-6. 打印「首次登录 + 启动服务」的后续步骤。
+5. 生成 `.env`（若不存在），并**交互式询问监测模式**（单会话 / 多会话，输入大号昵称后自动写入 .env）；
+6. 安装 systemd 服务 `douyin-forward`（**安装但不启动**）；
+7. 打印「首次登录 + 启动服务」的后续步骤。
+
+**监测模式交互示例**：
+
+```
+──────────────────────────────────────────────
+ 监测配置：要监测几个私信会话？
+   1) 单会话（只监测一个大号）—— 默认
+   2) 多会话（同时监测多个用户/大号的转发）
+   （注：大号 = 给你服务器上的小号转发视频的抖音账号；可多个）
+ 请选择 [1/2/3]:
+──────────────────────────────────────────────
+```
+
+- 选 1：输入一个大号昵称 → 写入 `DOUYIN_MAIN_ACCOUNT`；
+- 选 2：输入昵称列表（如 `小明,小红`）→ 写入 `DOUYIN_MAIN_ACCOUNTS`，**同时监测多个用户**；
+- 已配置过时会显示当前值，可直接回车「保持不变」；已部署后随时可重配：
+
+```bash
+sudo bash /opt/douyin_download_bot/deploy/configure_accounts.sh
+```
+
+- **非交互式部署**（如脚本化/CI）可用环境变量预设，避免卡在交互：
+
+```bash
+# 单会话
+MONITOR_MODE=single MONITOR_ACCOUNTS="我的大号" sudo -E bash deploy/install_ubuntu.sh
+# 多会话
+MONITOR_MODE=multi  MONITOR_ACCOUNTS="小明,小红" sudo -E bash deploy/install_ubuntu.sh
+```
 
 以 root 运行时脚本会自动创建并切换服务用户（默认 `douyin`）；已有 sudo 的普通用户直接运行即可，服务将以该用户运行。
 
@@ -123,8 +153,11 @@ python3 -m venv .venv
 sudo .venv/bin/playwright install-deps chromium
 .venv/bin/playwright install chromium
 
-# ④ 配置
-cp .env.example .env && nano .env        # 填 DOUYIN_MAIN_ACCOUNT
+# ④ 配置（单会话 / 多会话，二选一）
+cp .env.example .env && nano .env
+#   单会话：DOUYIN_MAIN_ACCOUNT=我的大号
+#   多会话：DOUYIN_MAIN_ACCOUNTS=小明,小红
+#   （也可以用交互式助手代填：sudo bash deploy/configure_accounts.sh）
 
 # ⑤ systemd 服务
 sudo sed -e "s|__APP_USER__|$RUN_AS|g" \
@@ -204,7 +237,7 @@ journalctl -u douyin-forward -f            # 实时日志
 sudo systemctl status douyin-forward       # 状态
 ```
 
-看到「抖音转发解析服务启动」与「小号登录态有效 ✅」后，即可在手机上的**大号**里把视频转发 / 分享到小号的私信，稍候片刻：
+看到「抖音转发解析服务启动」与「小号登录态有效 ✅」后（多会话模式还会打印 `已锁定 N 个目标会话，仅处理这些会话内的转发`），即可在手机上的**大号**里把视频转发 / 分享到小号的私信，稍候片刻：
 
 - 新视频会实时打印解析全程日志；
 - 结果归档到 `/opt/douyin_download_bot/output/<时间戳>_<视频ID>/`。
@@ -244,7 +277,8 @@ sudo systemctl status douyin-forward       # 状态
 | 更新解析能力 | `sudo -u douyin git -C /opt/douyin_download_bot/parse_hub_bot pull origin main`（git 子模块，解析链路随上游升级） |
 | 更新转发链路代码 | 服务器：`sudo -u douyin git -C /opt/douyin_download_bot pull && sudo systemctl restart douyin-forward`；或本地修改后重新打包上传覆盖（保留 `.env` 与 `forwarder_data/`） |
 | 重置解析记录 | `rm forwarder_data/state.json && sudo systemctl restart douyin-forward` |
-| 更换监测昵称（免重启） | `echo "新昵称" \| sudo tee /opt/douyin_download_bot/forwarder_data/agent_cmd.txt`（`echo reset \| sudo tee ...` 恢复 `.env` 默认值） |
+| 更换/追加监测账号（免重启） | `echo "小明,小红" \| sudo tee .../forwarder_data/agent_cmd.txt`（设为两个）；`echo "+小刚" \| sudo tee ...`（追加）；`echo "-小明" \| sudo tee ...`（移除）；`echo reset \| sudo tee ...`（恢复 .env 默认值） |
+| 重配监测模式（改 .env） | `sudo bash /opt/douyin_download_bot/deploy/configure_accounts.sh`（单会话/多会话交互选择），再 `sudo systemctl restart douyin-forward` |
 | 登录/验证期间远程操作 | `echo 1 \| sudo tee .../forwarder_data/agent_cmd.txt` 点击菜单第 1 项；`echo 123456 \| sudo tee ...` 填验证码（详见 README「远程控制台」） |
 | 重置登录态 | `rm -rf forwarder_data/browser_profile && sudo systemctl restart douyin-forward`（需重新登录） |
 | 备份登录态 | 定期打包 `forwarder_data/browser_profile/` 留存，登录失效时可快速恢复 |

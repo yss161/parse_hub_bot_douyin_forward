@@ -25,7 +25,7 @@ from typing import Any
 
 from log import logger
 
-from .config import ForwarderSettings
+from .config import ForwarderSettings, split_accounts
 from .douyin_web import DouyinWebReceiver
 from .parser_bridge import parse_url
 from .reporter import LogStatusReporter
@@ -126,8 +126,9 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
 
     override = state.get_value("main_account")
     if override:
+        names = split_accounts(override)
         logger.info(
-            f"监测昵称使用「控制台设置」值: {override}"
+            f"监测账号使用「控制台设置」值（{len(names)} 个）: {'、'.join(names)}"
             f"（.env 默认: {settings.main_account or '未设置'}；控制台输入 reset 可恢复默认）"
         )
 

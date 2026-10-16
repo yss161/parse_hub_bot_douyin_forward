@@ -125,11 +125,19 @@ playwright install chromium
 cp .env.example .env
 ```
 
-编辑 `.env`，至少建议填写：
+编辑 `.env`，选择监测模式（二选一）：
 
 ```ini
+# 单会话：只监测一个大号
 DOUYIN_MAIN_ACCOUNT=你的大号昵称
+
+# 多会话：同时监测多个用户/大号（多个昵称用逗号分隔）
+DOUYIN_MAIN_ACCOUNTS=小明,小红
 ```
+
+> 💡 **Ubuntu 一键部署时脚本会交互式询问「单会话 / 多会话」并代填**（见 [DEPLOY_UBUNTU.md](DEPLOY_UBUNTU.md)）；
+> 已经部署好的也可以随时重新选择：`sudo bash deploy/configure_accounts.sh`。
+> 运行中还可以完全不改配置——往 `forwarder_data/agent_cmd.txt` 写昵称即可免重启更换（见「远程控制台」）。
 
 其余项均有默认值（详见 [.env.example](.env.example) 内注释）。
 
@@ -195,15 +203,21 @@ python run.py test-url "https://v.douyin.com/xxxxxxx/"
 ```bash
 # 示例：把「我的大号」设为监测对象（免编辑 .env、免重启，立即生效）
 echo "我的大号" > forwarder_data/agent_cmd.txt          # 服务器上: /opt/douyin_download_bot/forwarder_data/agent_cmd.txt
+
+# 同时监测多个用户（逗号分隔）；+ 追加、- 移除：
+echo "小明,小红" > forwarder_data/agent_cmd.txt    # 同时监测 小明 和 小红
+echo "+小刚" > forwarder_data/agent_cmd.txt       # 再追加 小刚（现在监测 3 个）
+echo "-小红" > forwarder_data/agent_cmd.txt       # 移除 小红
 ```
 
 | 输入 | 作用 |
 | --- | --- |
-| 任意文本（如 `我的大号`） | 设为**监测的大号昵称**（对话式添加，免指令、免重启；持久化到 `state.json`） |
-| `reset` / `重置` | 清除自定义昵称，恢复 `.env` 的 `DOUYIN_MAIN_ACCOUNT` |
+| 任意文本（如 `我的大号`） | 设为**监测账号**；多个用逗号分隔（如 `小明,小红`）→ 同时监测多个聊天用户（免指令、免重启；持久化到 `state.json`） |
+| `+昵称` / `-昵称` | **追加 / 移除**一个（或逗号分隔多个）监测账号 |
+| `reset` / `重置` | 清除自定义账号，恢复 `.env` 的 `DOUYIN_MAIN_ACCOUNT` / `DOUYIN_MAIN_ACCOUNTS` |
 | `1` ~ `9` | **登录操作菜单**编号（登录/验证页面出现，见下） |
 | `123456` | 登录流程中自动填入验证码；`123456 go` = 填入并回车提交 |
-| `menu` / `菜单` | 重新输出操作菜单 / 使用说明 |
+| `menu` / `菜单` | 重新输出操作菜单 / 使用说明（含当前监测账号列表） |
 | `force` / `立即` | 不等轮询周期，立刻执行下一轮检查 |
 
 ### 登录操作菜单（回复数字即可点击）
@@ -266,7 +280,8 @@ echo "123456 go" > forwarder_data/agent_cmd.txt  # 填入并回车提交（一�
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
-| `DOUYIN_MAIN_ACCOUNT` | 空 | 大号昵称关键字，用于定位会话；**会严格锁定该会话**（只解析该会话内的新转发，其他会话/群聊的分享会被忽略）；留空则选有未读/第一条会话。**也可以不改这里**——运行中直接往控制台写昵称即可（见上文「远程控制台」） |
+| `DOUYIN_MAIN_ACCOUNT` | 空 | **单会话**：只监测一个大号（昵称包含匹配）；**匹配到的会话会被严格锁定**——只解析这些会话内的新转发，其他会话/群聊的分享会被忽略 |
+| `DOUYIN_MAIN_ACCOUNTS` | 空 | **多会话**：同时监测多个用户/大号，昵称用逗号分隔（如 `小明,小红`）；设置后优先于 `DOUYIN_MAIN_ACCOUNT`。两者都留空则自动选「有未读角标/第一条」会话。**也可以不改这里**——运行中直接往控制台写昵称即可（见「远程控制台」） |
 | `DOUYIN_POLL_INTERVAL` | `20` | 私信轮询间隔（秒） |
 | `FORWARDER_PARSE_MIN_INTERVAL` | `8` | 两次解析之间的最小间隔（秒），防频繁请求 |
 | `FORWARDER_OUTPUT_DIR` | `./output` | 归档目录 |
@@ -415,6 +430,12 @@ sudo APP_USER=douyin bash deploy/install_ubuntu.sh
 **Q14. 服务器磁盘会不会被占满？**
 不会无限增长：默认「推送成功即删本地归档」+「超过 72 小时的缓存定时清理」（见「本地缓存清理」）。
 如果你不用 TG 推送、又希望长期保留归档，把 `FORWARDER_CACHE_TTL_HOURS=0` 即可关闭定时清理。
+
+**Q15. 能同时监测多个聊天用户吗（多个大号都往小号转发）？**
+可以，两种方式任选：
+① `.env` 里用 `DOUYIN_MAIN_ACCOUNTS=小明,小红`（Ubuntu 部署脚本会交互式询问「单会话 / 多会话」并代填）；
+② 运行中往控制台写：`echo "小明,小红" > forwarder_data/agent_cmd.txt`（`+`追加 / `-`移除，免重启）。
+所有匹配到的会话都会被逐个打开并**锁定**，只解析这些会话里的新转发；同一个视频无论谁转发过、转发几次，也只处理一次（视频 ID 级去重）。
 
 **Q9. 为什么依赖清单里没有 tgcrypto？**
 原项目将其列为依赖，但 tgcrypto 仅用于 Telegram 连接的原生加密加速（可选），且对新版 Python 无预编译轮子、无编译链时会安装失败。本服务不启动 Telegram Bot，运行时用不到，故省略；如你同时还要跑原项目的 TG Bot，可单独 `pip install tgcrypto`。
