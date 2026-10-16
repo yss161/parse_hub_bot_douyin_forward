@@ -19,8 +19,9 @@
 | 端口 | 默认**无需开放任何入站端口**（服务只做出站请求）；如需「登录预览链接」功能，可选放行 `8765`（建议仅放行你自己的 IP，或改用 SSH 隧道） |
 | 账号 | 建议使用专门的**小号**，并与大号互相关注 |
 
-> 💡 无需配置 Telegram 相关（`API_ID` / `API_HASH` / `BOT_TOKEN`）：本服务只复用原项目的解析引擎，
-> TG 机器人部分不会启动（`run.py` 启动时自动注入占位配置）。日志里 `未找到 platform_config.yaml, 跳过加载` 也属正常。
+> 💡 纯解析**不需要** Telegram：本服务只复用原项目的解析引擎，原项目的 TG 机器人不会启动（`run.py` 启动时自动注入占位配置）。
+> 只有当你要「解析后自动推送到 Telegram 群组/频道」时才需要配置 TG 凭据（见第 6 节）。
+> 日志里 `未找到 platform_config.yaml, 跳过加载` 也属正常（那是**可选**的抖音 Cookie/代理配置，不配也能解析）。
 
 ### 部署前连通性检查（可选，1 分钟）
 
@@ -295,22 +296,64 @@ sudo systemctl status douyin-forward       # 状态
 
 ---
 
-## 8. 故障排查
+## 8. 故障排查（可能遇到的问题）
+
+按阶段分类，先定位到对应小节再对号入座。排查通用口诀：**先看日志** `journalctl -u douyin-forward -f`；多数问题日志里都有直接提示。
+
+### 8.1 部署 / 依赖
 
 | 现象 | 处理 |
 | --- | --- |
 | `systemctl status` 显示 failed，日志报找不到 python | `.venv` 未创建成功：重新执行 `bash deploy/install_ubuntu.sh` |
-| 浏览器启动失败，报缺 `.so` 库 | `sudo .venv/bin/playwright install-deps chromium` 后重启服务 |
-| 日志提示「profile 被占用」 | 有其它进程在使用 `forwarder_data/browser_profile`：`sudo systemctl stop douyin-forward`，`pkill -f run.py`，再重试 |
-| 登录命令报 profile 被占用 | 服务正在运行占用了 profile：`sudo systemctl stop douyin-forward` 后登录，登录完成再 `sudo systemctl start douyin-forward` |
-| 提示「验证码中间页」 | 在服务器上以有界面方式扫码（第 4 节方式 ①/②），或间隔一段时间/换网络环境重试；**注意登录态不能跨机器复制**（原因见第 4 节警告框） |
-| 提示「未找到私信会话」 | 检查监测昵称是否与大号昵称匹配（也可直接 `echo "大号昵称" \| sudo tee .../agent_cmd.txt` 即时更换）；确认大号已给小号发过消息；开 `FORWARDER_DUMP_HTML=true` 重启查看转储 HTML |
-| 预览链接（8765）打不开 | ① 云安全组未放行 8765（建议仅放行自己 IP）；② AWS 等 NAT 实例未设 `FORWARDER_SHOT_HOST`（自动探测到内网 IP）；③ 或改用 SSH 隧道：`ssh -L 8765:127.0.0.1:8765 <用户>@<服务器IP>` 后访问 `http://127.0.0.1:8765/` |
-| 日志出现「检测到重复，已跳过」 | 正常行为：该作品此前已处理过（重复转发 / 不同链接指向同一视频）。如需重新处理，删除 `state.json` 后重启 |
-| 转发后没解析 | 首次启动只记录"水位"，只处理**启动之后**新转发的视频；想处理历史：设 `DOUYIN_PROCESS_HISTORY=true` 并删除 `state.json` 后重启 |
-| 解析失败（自动重试 3 次后放弃） | 查看日志中的具体错误；抖音解析偶发失败可把该视频重新转发一次触发重试 |
-| xvfb 登录时二维码扫不了 | 确认 `forwarder_data/login_qr.png` 在持续更新（每 ~25s 刷新）；重新执行登录命令 |
-| 想观察浏览器实际画面 | 服务器加装 VNC（如 `x11vnc`）后可直接看到画面，并按第 4 节方式 ③ 登录 |
+| pip 安装报「找不到 parsehub」或版本过低 | 换腾讯云镜像：`pip install -r requirements-forwarder.txt -i https://mirrors.cloud.tencent.com/pypi/simple`（清华/阿里镜像落后，`parsehub>=2.3.5` 只有腾讯云/官方源有） |
+| pip 安装 `tgcrypto` 报编译错误 | **忽略即可**：它是 Telegram 加密加速的可选项，本项目用不到，依赖清单已剔除 |
+| Playwright 浏览器启动报缺 `.so` 库 | `sudo .venv/bin/playwright install-deps chromium` 后重启服务 |
+| 二维码/截图里的中文显示为方框/乱码 | 缺中文字体：`sudo apt-get install -y fonts-noto-cjk`（一键脚本已包含） |
+| Python 版本低于 3.12 | 脚本会自动装 `python3.12`；手动装见第 3 节 deadsnakes PPA 说明 |
+| `git clone` 后 `parse_hub_bot/` 是空的 | 克隆时漏了 `--recursive`：`cd /opt/douyin_download_bot && git submodule update --init --recursive` |
+| 项目路径含空格 | 换无空格路径（推荐 `/opt/douyin_download_bot`），systemd 更省心 |
+
+### 8.2 登录 / 风控
+
+| 现象 | 处理 |
+| --- | --- |
+| 出现「验证码中间页」（滑块） | 无头 + 全新 profile 易触发。用**有界面**方式扫码（第 4 节方式 ①/②）；或间隔一段时间、更换网络出口重试 |
+| 出现「身份验证」页（异地登录二次验证） | 日志自动给出【登录操作菜单】：`echo 1 \| sudo tee .../agent_cmd.txt` 点击「接收短信验证码」→ 短信到后 `echo "123456 go" \| ...` 填入并提交；或按菜单选「使用密码验证」 |
+| 二维码扫了没反应 / 提示已过期 | 二维码约 1 分钟过期——每次扫**最新**一张（日志每次刷新重新输出最新链接，或直接打开 `http://<IP>:8765/` 看自动刷新的预览页） |
+| 短信验证码提示「操作频繁」 | 官方约 60 秒才能获取一次，等冷却后再点（菜单里也会提示剩余秒数） |
+| 登录命令报「profile 被占用」 | 服务正在运行占用了 profile：先 `sudo systemctl stop douyin-forward`，登录完成再 `start` |
+| 反复提示「未检测到有效登录态」 | 登录态失效，或**跨机器复制了 browser_profile**（Cookie 按机器加密、复制后无法解密）→ 必须在服务器本机重新扫码（第 4 节） |
+| xvfb 里拖不了滑块 | xvfb/无头都无法拖滑块：换有桌面环境（VNC/RDP，第 4 节方式 ③）或换网络重试 |
+
+### 8.3 运行 / 解析
+
+| 现象 | 处理 |
+| --- | --- |
+| 转发后**没解析** | 首次启动只记录「水位」，只处理**启动之后**新转发的视频；想处理历史：`DOUYIN_PROCESS_HISTORY=true` 并删除 `state.json` 后重启 |
+| 提示「未找到私信会话」 | ① 大号给小号发过消息；② 监测昵称与大号昵称匹配（`echo "昵称" \| sudo tee .../agent_cmd.txt` 即时更换）；③ 互相关注、把消息移出「陌生人消息」；④ `FORWARDER_DUMP_HTML=true` 转储页面排查 |
+| 解析到了**别的会话/群聊**的内容 | 会话锁定没生效：确认监测昵称唯一、不含会误匹配的子串；日志应有 `已锁定 N 个目标会话` |
+| 提取到的链接不对（活动推广位垃圾链接） | 已用「消息接口数据 itemId」根治，正常不会出现；若复现开 `FORWARDER_DUMP_HTML=true` 把 HTML 发出来排查 |
+| 日志出现「检测到重复，已跳过」 | 正常：该作品此前已处理过（重复转发/不同链接同一视频），视频 ID 级去重；要重新处理就删 `state.json` |
+| 解析失败（自动重试 3 次后放弃） | 看日志具体错误；删除/私密作品解析失败属正常；偶发失败把该视频重新转发一次可触发重试 |
+| 多会话没全部监测到 | 确认 `DOUYIN_MAIN_ACCOUNTS` 逗号分隔；看日志 `已锁定 N 个` 的 N 是否符合预期；昵称需精确（包含匹配） |
+
+### 8.4 Telegram 推送（可选功能）
+
+| 现象 | 处理 |
+| --- | --- |
+| `TG_PUSH=true` 但没推送 | 看启动日志：① `API_ID`/`API_HASH`/`BOT_TOKEN` 缺一不可；② `TG_TARGET_CHAT` 没填 |
+| 日志「TG 推送初始化失败」 | ① 机器人没进目标群/频道（**频道需设为管理员并勾选发帖权限**）；② `TG_TARGET_CHAT` 格式错误；③ 服务器连不上 Telegram |
+| 国内服务器连不上 Telegram | 配置 `BOT_PROXY=http://127.0.0.1:7890`（或 socks5://…）后重启 |
+| 推送成功但想保留本地副本 | `.env` 设 `FORWARDER_CLEANUP_AFTER_PUSH=false` |
+
+### 8.5 预览链接 / 磁盘
+
+| 现象 | 处理 |
+| --- | --- |
+| 预览链接（8765）打不开 | ① 云安全组未放行 8765（建议仅放行自己 IP）；② AWS 等 NAT 实例未设 `FORWARDER_SHOT_HOST`（自动探测到内网 IP）；③ 或 SSH 隧道：`ssh -L 8765:127.0.0.1:8765 <用户>@<服务器IP>` 后访问 `http://127.0.0.1:8765/` |
+| 不想开放预览端口 | `.env` 设 `FORWARDER_SHOT_PORT=0` 关闭；或 `FORWARDER_SHOT_BIND=127.0.0.1` 仅本机 + 隧道访问 |
+| `output/` 目录持续增大 | 默认自动清理：推送成功即删本地副本 + 超过 `FORWARDER_CACHE_TTL_HOURS`（默认 72h）定时清理；想长期保留设 `FORWARDER_CACHE_TTL_HOURS=0` |
+| 想观察浏览器实际画面 | 服务器加装 VNC（如 `x11vnc`），用第 4 节方式 ③ 登录观察 |
 
 ---
 
@@ -358,3 +401,93 @@ journalctl -u douyin-forward --since "30 min ago" | grep -E "已锁定|登录操
 ```
 
 任何一项对不上：把对应日志片段（`journalctl -u douyin-forward --since "10 min ago"`）发出来即可快速定位。
+
+---
+
+## 11. 远程控制台指令速查（forwarder_data/agent_cmd.txt）
+
+服务运行期间（登录等待每 3 秒、日常轮询每轮）都会检查这个文件：把内容写进去（UTF-8，每行一条，可多行）即可执行，**执行后文件自动删除**。这是「登录编号菜单 / 验证码直填 / 对话式加账号」的统一入口，无需记任何指令。
+
+| 输入 | 作用 | 适用时机 |
+| --- | --- | --- |
+| `1` ~ `9` | 点击【登录操作菜单】第 N 项（如 `1` = 点击「接收短信验证码」） | 登录/验证页出现菜单时 |
+| `123456` | 自动填入短信验证码 | 登录流程中 |
+| `123456 go` | 填入验证码并回车提交（`go` / `enter` / `回车` 均可） | 登录流程中 |
+| `小明,小红` | 设为监测账号（逗号分隔 = 多会话监测） | 任意 |
+| `+小刚` / `-小红` | 追加 / 移除一个（或多个）监测账号 | 任意 |
+| `reset` / `重置` | 清除自定义账号，恢复 `.env` 默认值 | 任意 |
+| `menu` / `菜单` / `help` | 重新输出菜单 / 使用说明（含当前监测账号列表） | 任意 |
+| `force` / `立即` | 不等轮询周期，立刻执行下一轮检查 | 任意 |
+| `刷新` / `refresh` | 重新截图并输出最新预览链接 | 登录期间 |
+
+写法示例（服务器上，用 `sudo tee` 规避权限问题）：
+
+```bash
+echo "小明,小红" | sudo tee /opt/douyin_download_bot/forwarder_data/agent_cmd.txt   # 设置 / 多会话
+echo "+小刚"     | sudo tee /opt/douyin_download_bot/forwarder_data/agent_cmd.txt   # 追加一个
+echo "-小红"     | sudo tee /opt/douyin_download_bot/forwarder_data/agent_cmd.txt   # 移除一个
+echo reset       | sudo tee /opt/douyin_download_bot/forwarder_data/agent_cmd.txt   # 恢复 .env 默认
+echo menu        | sudo tee /opt/douyin_download_bot/forwarder_data/agent_cmd.txt   # 查看帮助
+```
+
+> - 菜单/帮助也会同步写入 `forwarder_data/login_menu.txt` 与 `agent_help.txt`，可随时 `cat` 查看；
+> - 兼容旧版自由指令（一般用不到）：`click_text 文本` / `fill 内容` / `type 内容` / `press Enter` / `click x y` / `drag x1 y1 x2 y2` / `wait 秒`。
+
+---
+
+## 12. 完整配置参考（.env）
+
+所有变量都有默认值，**一般只需设置「监测账号」与「TG 推送」两组**；其余按需覆盖。修改后 `sudo systemctl restart douyin-forward` 生效（监测账号除外——它也能免重启经控制台改）。
+
+### 监测账号（二选一）
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `DOUYIN_MAIN_ACCOUNT` | 空 | 单会话：一个大号昵称 |
+| `DOUYIN_MAIN_ACCOUNTS` | 空 | 多会话：多个昵称逗号分隔，优先于上一项 |
+
+### 抖音端
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `DOUYIN_CHAT_URL` | `https://www.douyin.com/chat?isPopup=1` | 私信页地址（抖音改版才需要改） |
+| `DOUYIN_HEADLESS` | `true` | 无头模式；首次登录/本机调试可设 `false` |
+| `DOUYIN_QR_TIMEOUT` | `300` | 扫码等待秒数（超时自动重开窗口滚动重试） |
+| `DOUYIN_POLL_INTERVAL` | `20` | 私信轮询间隔（秒） |
+| `DOUYIN_ONLY_OTHERS` | `true` | 只处理对方（大号）发来的消息 |
+| `DOUYIN_PROCESS_HISTORY` | `false` | 首次运行是否处理历史转发 |
+
+### Telegram 推送（可选）
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `TG_PUSH` | `false` | 推送开关 |
+| `TG_TARGET_CHAT` | 空 | `@用户名` / `-100` 数字 ID / t.me 链接 |
+| `API_ID` / `API_HASH` / `BOT_TOKEN` | 空 | my.telegram.org 申请 + @BotFather 建机器人 |
+| `BOT_PROXY` | 空 | 国内服务器代理，如 `http://127.0.0.1:7890` |
+
+### 登录预览链接（截图变可点击链接）
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `FORWARDER_SHOT_PORT` | `8765` | 只读 HTTP 服务端口；`0` = 关闭 |
+| `FORWARDER_SHOT_BIND` | `0.0.0.0` | 监听地址；仅本机/隧道用 `127.0.0.1` |
+| `FORWARDER_SHOT_HOST` | 空 | 链接里显示的对外 IP（AWS 等 NAT 实例建议显式填公网 IP） |
+
+### 解析 / 归档 / 清理
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `FORWARDER_OUTPUT_DIR` | `./output` | 归档目录 |
+| `FORWARDER_PARSE_MIN_INTERVAL` | `8` | 两次解析最小间隔（秒），防频繁请求 |
+| `FORWARDER_SKIP_MEDIA_PROCESSING` | `true` | 跳过转码、归档原始文件；`false` 需装 ffmpeg |
+| `FORWARDER_SAVE_METADATA` | `true` | 归档目录写入 `metadata.json` |
+| `FORWARDER_CLEANUP_AFTER_PUSH` | `true` | TG 推送成功即删除本地归档 |
+| `FORWARDER_CACHE_TTL_HOURS` | `72` | 本地缓存保留时长（小时）；`0` = 关闭定时清理 |
+
+### 调试
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `FORWARDER_DEBUG` | `false` | 调试日志 |
+| `FORWARDER_DUMP_HTML` | `false` | 提取失败时转储私信页 HTML 到 `forwarder_data/debug/`（调选择器用） |
