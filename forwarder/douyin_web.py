@@ -226,6 +226,8 @@ class DouyinWebReceiver:
         self._force_poll: bool = False
         # 是否已提示过"未能锁定目标会话"
         self._warned_conv_lock: bool = False
+        # 上次输出到日志的二维码内容指纹（内容没变不重复输出 base64/字符画）
+        self._last_qr_fp: str = ""
 
     # ══════════════════════ 生命周期 ══════════════════════
 
@@ -539,10 +541,13 @@ class DouyinWebReceiver:
 
         抖音登录弹窗里的二维码是一个 base64 的方形图片（约 160~220px）；
         以「data:image 前缀 + 方形尺寸」双重条件筛选，避免误截 logo 等小图标。
+
+        截取成功后会把【二维码 base64 编码】与【终端字符画版二维码】打印到日志
+        （内容变化时才输出）——SSH 会话里不用下载图片，直接扫终端上的字符画即可。
         """
         page = self._page
         assert page is not None
-        candidates: list[ElementHandle] = []
+        candidates: list[tuple[ElementHandle, str]] = []   # (元素, data URI；canvas 为空串)
 
         try:
             for img in await page.query_selector_all("img"):
@@ -552,7 +557,7 @@ class DouyinWebReceiver:
                         continue
                     box = await img.bounding_box()
                     if box and 120 <= box["width"] <= 340 and abs(box["width"] - box["height"]) <= 20:
-                        candidates.append(img)
+                        candidates.append((img, src))
                 except Exception:
                     continue
         except Exception:
@@ -563,19 +568,121 @@ class DouyinWebReceiver:
                 try:
                     box = await cv.bounding_box()
                     if box and 120 <= box["width"] <= 340 and abs(box["width"] - box["height"]) <= 20:
-                        candidates.append(cv)
+                        candidates.append((cv, ""))
                 except Exception:
                     continue
         except Exception:
             pass
 
-        for el in candidates:
+        for el, data_uri in candidates:
             try:
                 await el.screenshot(path=str(path))
-                return True
             except Exception:
                 continue
+            try:
+                self._log_qr_details(data_uri, path.read_bytes())
+            except Exception:
+                pass
+            return True
         return False
+
+    def _log_qr_details(self, data_uri: str, png_bytes: bytes) -> None:
+        """把二维码 base64 与「终端字符画」输出到日志（内容与上次相同则跳过，避免刷屏）。"""
+        fp = fingerprint(png_bytes)
+        if fp == self._last_qr_fp:
+            return
+        self._last_qr_fp = fp
+
+        parts = [
+            "【登录二维码 · 终端直扫】（深色背景终端效果最佳；识别不了就用下方 base64 / 预览链接 / 截图文件）",
+        ]
+        ascii_qr = self._qr_terminal_blocks(png_bytes)
+        if ascii_qr:
+            parts.append(ascii_qr)
+        if data_uri:
+            parts.append(f"二维码 base64（即 <img src> 的 data URI，可直接还原为图片）:\n{data_uri}")
+        else:
+            parts.append(f"（本次二维码来自 canvas 截图、无 base64；图片文件: {self.settings.qr_image_path}）")
+        logger.info("\n".join(parts))
+
+    @staticmethod
+    def _qr_terminal_blocks(png_bytes: bytes) -> str | None:
+        """把二维码 PNG 渲染成 Unicode 半块字符画（终端可直接扫码），失败返回 None。
+
+        不依赖任何二维码库：黑色像素包围盒定位二维码 → 用顶部定位图案的首段黑色游标
+        （恰为 7 个模块宽）推算模块尺寸 → 逐模块 3x3 多数采样 → ▀▄█/空格 渲染。
+        渲染按「深色背景终端」假设：白模块=亮块 █，黑模块=空格（透出暗背景）。
+        """
+        try:
+            import io
+
+            from PIL import Image
+
+            gray = Image.open(io.BytesIO(png_bytes)).convert("L")
+        except Exception:
+            return None
+        try:
+            width, height = gray.size
+            if width < 40 or height < 40:
+                return None
+            bw = gray.point(lambda v: 255 if v < 128 else 0)   # 黑色→255
+            bbox = bw.getbbox()                                 # 黑色像素包围盒 (l, t, r, b)
+            if not bbox:
+                return None
+            min_x, min_y = bbox[0], bbox[1]
+            max_x, max_y = bbox[2] - 1, bbox[3] - 1
+            px = gray.load()
+
+            # 顶部定位图案的首段黑色游标 ≈ 7 个模块宽 → 粗估模块数；
+            # 再用包围盒宽度（=模块数×模块尺寸）精化，消除累计漂移
+            run = 0
+            x = min_x
+            while x <= max_x and px[x, min_y] < 128:
+                run += 1
+                x += 1
+            if run < 14:      # 至少 2px/模块，采样才可靠
+                return None
+            count = round((max_x - min_x + 1) / (run / 7.0))
+            if not 21 <= count <= 177:
+                return None
+            module = (max_x - min_x + 1) / count
+
+            def is_dark(mx: int, my: int) -> bool:
+                cx = min_x + int((mx + 0.5) * module)
+                cy = min_y + int((my + 0.5) * module)
+                total = dark_cnt = 0
+                for dy in (-1, 0, 1):
+                    for dx in (-1, 0, 1):
+                        x2, y2 = cx + dx, cy + dy
+                        if 0 <= x2 < width and 0 <= y2 < height:
+                            total += 1
+                            if px[x2, y2] < 128:
+                                dark_cnt += 1
+                return dark_cnt * 2 > total
+
+            # 渲染：1 模块=1 字符宽、2 模块=1 字符行（▀▄█/空格），四周留 2 模块静区
+            quiet = 2
+            grid = count + quiet * 2
+
+            def cell(top_dark: bool, bottom_dark: bool) -> str:
+                if top_dark and bottom_dark:
+                    return " "
+                if not top_dark and not bottom_dark:
+                    return "█"
+                return "▄" if top_dark else "▀"
+
+            lines = []
+            for gy in range(0, grid, 2):
+                chars = []
+                for gx in range(grid):
+                    my1, my2 = gy - quiet, gy + 1 - quiet
+                    td = is_dark(gx, my1) if 0 <= my1 < count else False
+                    bd = is_dark(gx, my2) if 0 <= my2 < count else False
+                    chars.append(cell(td, bd))
+                lines.append("".join(chars))
+            return "\n".join(lines)
+        except Exception:
+            return None
 
     async def _snapshot_login_page(self) -> None:
         """保存登录页面整页截图（排查扫码不生效 / 风控拦截时用）。"""

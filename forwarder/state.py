@@ -21,9 +21,10 @@ import time
 from pathlib import Path
 
 
-def fingerprint(text: str, length: int = 20) -> str:
-    """稳定指纹（跨进程一致，区别于 Python 内置 hash）。"""
-    return hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()[:length]
+def fingerprint(text: str | bytes, length: int = 20) -> str:
+    """稳定指纹（跨进程一致，区别于 Python 内置 hash）；接受字符串或字节。"""
+    data = text.encode("utf-8", errors="ignore") if isinstance(text, str) else bytes(text)
+    return hashlib.sha1(data).hexdigest()[:length]
 
 
 # 抖音链接中的纯数字作品 ID（video/note/slides 路径、modal_id / aweme_id 参数）

@@ -149,6 +149,7 @@ DOUYIN_HEADLESS=false python run.py login     # Windows PowerShell: $env:DOUYIN_
 ```
 
 - 脚本会打开抖音网页版，**登录二维码弹窗会自动出现**，脚本自动截取二维码保存到 `forwarder_data/login_qr.png`；
+- 二维码会**直接以字符画打印在日志里**（深色背景终端可直接扫）并同时输出 base64 编码——SSH 会话里无需下载图片；
 - 用**小号**的抖音 App 扫码；如果浏览器窗口可见，直接对着屏幕上的二维码扫也可以；
 - 登录成功后登录态会持久化到 `forwarder_data/browser_profile/`，之后重启免扫码。
 
