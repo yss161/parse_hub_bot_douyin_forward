@@ -309,7 +309,7 @@ sudo systemctl status douyin-forward       # 状态
 | 日志出现「检测到重复，已跳过」 | 正常行为：该作品此前已处理过（重复转发 / 不同链接指向同一视频）。如需重新处理，删除 `state.json` 后重启 |
 | 转发后没解析 | 首次启动只记录"水位"，只处理**启动之后**新转发的视频；想处理历史：设 `DOUYIN_PROCESS_HISTORY=true` 并删除 `state.json` 后重启 |
 | 解析失败（自动重试 3 次后放弃） | 查看日志中的具体错误；抖音解析偶发失败可把该视频重新转发一次触发重试 |
-| xvfb 登录时二维码扫不了 | 确认 `forwarder_data/login_qr.png` 在持续更新（每 ~45s 刷新）；重新执行登录命令 |
+| xvfb 登录时二维码扫不了 | 确认 `forwarder_data/login_qr.png` 在持续更新（每 ~25s 刷新）；重新执行登录命令 |
 | 想观察浏览器实际画面 | 服务器加装 VNC（如 `x11vnc`）后可直接看到画面，并按第 4 节方式 ③ 登录 |
 
 ---
@@ -322,3 +322,39 @@ sudo systemctl status douyin-forward       # 状态
 - 服务以普通用户（默认 `douyin`）运行，项目目录归属该用户，遵循最小权限；
 - 使用自动化操作自己的账号存在平台风控风险，**请使用专门小号**并保持默认的保守频率（轮询 20s / 解析间隔 8s）；
 - 请遵守抖音用户协议，仅用于个人保存自己账号可访问的内容。
+
+---
+
+## 10. 功能验收清单（更新后逐项确认生效）
+
+> 适用版本：commit `043a5cf` 及以后（登录编号菜单 / 截图链接 / 作品去重 / 对话式加账号 / 静音暂停 / 缓存清理 / 多会话）。
+> 更新命令：`sudo systemctl stop douyin-forward && cd /opt/douyin_download_bot && sudo -u douyin git pull && sudo systemctl start douyin-forward`
+
+**基础检查（1 分钟）**
+
+```bash
+cd /opt/douyin_download_bot
+git log --oneline -2                                   # 应能看到 043a5cf / a6cdfc6（或更新提交）
+grep -E "SHOT_PORT|SHOT_HOST|CLEANUP_AFTER_PUSH|CACHE_TTL|MAIN_ACCOUNT" .env   # 相关配置是否就位
+journalctl -u douyin-forward -f                        # 实时日志
+```
+
+**逐项验收**
+
+| # | 功能 | 怎么验证 | 预期结果 |
+| --- | --- | --- | --- |
+| ① | 登录编号菜单 | 下次登录/验证时观察日志；或运行中执行 `echo menu \| sudo tee forwarder_data/agent_cmd.txt` | 日志出现【登录操作菜单】「回复 1 → 点击「接收短信验证码」」及 ⏱（60 秒一次 / 5 分钟有效）提醒；`echo 1 \| ...` 即执行对应点击 |
+| ② | 截图/预览链接 | 登录期间看日志；或 `echo menu \| ...` 后查看 `agent_help.txt` 链接 | 日志出现【登录预览链接】`http://<IP>:8765/login_qr.png?t=…`；**每次二维码刷新（25 秒）都会重新输出最新链接**；浏览器打开 `http://<IP>:8765/` 可见预览页 |
+| ③ | 作品重复检测 | 用大号把**已处理过**的视频再转发一次 | 日志 `检测到重复，已跳过: 作品已在库（视频 ID …）`，不会重复下载（缓存清理后依然有效） |
+| ④ | 对话式加账号 | `echo "小明,小红" \| sudo tee forwarder_data/agent_cmd.txt`（`+追加` / `-移除` / `reset` 同理） | 日志 `✅ 已设置监测账号，当前 2 个: 小明、小红`；下一轮轮询即按新设置工作、免重启 |
+| ⑤ | 视频静音暂停 | 有界面模式（VNC）观察提取链接时打开的浏览器 | 视频不会播放/出声音（无头模式无感知，属静默改进，无需操作） |
+| ⑥ | 缓存自动清理 | 配好 TG 推送后转发一个新视频；或等定时清理生效 | 日志 `🧹 推送成功，已删除本地缓存: <目录名>`；`ls output/` 不再堆积。未开推送则按 `FORWARDER_CACHE_TTL_HOURS`（默认 72h）清理 |
+| ⑦ | 多会话监测 | 已配置多个昵称时看启动/轮询日志；两个大号各转发一条视频 | 日志 `已锁定 2 个目标会话，仅处理这些会话内的转发: 小明（ID: …）；小红（ID: …）`，两条视频都被解析 |
+
+**一键抽查**（服务运行期间随时执行，看最近半小时是否各就位）：
+
+```bash
+journalctl -u douyin-forward --since "30 min ago" | grep -E "已锁定|登录操作菜单|预览链接|检测到重复|已设置监测账号|已删除本地缓存"
+```
+
+任何一项对不上：把对应日志片段（`journalctl -u douyin-forward --since "10 min ago"`）发出来即可快速定位。
