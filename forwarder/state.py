@@ -52,7 +52,13 @@ class StateStore:
     def __init__(self, path: Path, max_entries: int = 5000) -> None:
         self.path = Path(path)
         self.max_entries = max(100, max_entries)
-        self._data: dict[str, dict] = {"processed": {}, "seen_messages": {}, "flags": {}, "values": {}}
+        self._data: dict[str, dict] = {
+            "processed": {},
+            "seen_messages": {},
+            "settled": {},
+            "flags": {},
+            "values": {},
+        }
         self._load()
 
     # ────────────────────────── 持久化 ──────────────────────────
@@ -83,7 +89,7 @@ class StateStore:
         tmp.replace(self.path)
 
     def _prune(self) -> None:
-        for key in ("processed", "seen_messages", "failures", "gave_up"):
+        for key in ("processed", "seen_messages", "settled", "failures", "gave_up"):
             bucket = self._data.get(key)
             if not isinstance(bucket, dict) or len(bucket) <= self.max_entries:
                 continue
@@ -137,6 +143,23 @@ class StateStore:
     def unmark_seen_message(self, fp: str) -> None:
         """撤销"已识别"标记（解析失败时调用，让下一轮重新提取并重试）。"""
         self._data["seen_messages"].pop(fp, None)
+
+    # ────────────────────────── settled（消息已有"定论"） ──────────────────────────
+    # 说明：一条消息被识别（seen）后，最终会有三种结局——
+    #   成功（processed）/ 失败放弃（gave_up）/ 首轮水位跳过（历史消息）。
+    # settled 记录"这条消息已不必再处理"。它与 seen 的区别：
+    #   · seen = 已识别过（可能还没处理完，比如解析中进程被杀）；
+    #   · settled = 已有定论（不再重试）。
+    # 于是：seen 且未 settled 且不在当前进程处理中 → 上次被中断，重启后应恢复处理。
+
+    def is_settled(self, fp: str) -> bool:
+        return fp in self._data["settled"]
+
+    def mark_settled(self, fp: str) -> None:
+        self._data["settled"][fp] = int(time.time())
+
+    def unmark_settled(self, fp: str) -> None:
+        self._data["settled"].pop(fp, None)
 
     # ────────────────────────── 失败计数 / 放弃 ──────────────────────────
 

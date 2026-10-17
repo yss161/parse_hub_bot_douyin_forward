@@ -157,12 +157,16 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
                 fp = fingerprint(cand.url)
                 if state.is_processed(fp) or state.is_gave_up(fp):
                     logger.debug(f"已处理/已放弃，跳过: {cand.url}")
+                    state.mark_settled(cand.msg_fp)
+                    receiver.mark_inflight_done(cand.msg_fp)
                     continue
 
                 # 作品级重复检测：同一视频换链接/换消息重复转发时也跳过
                 vid = video_id_from_url(cand.url)
                 if vid and state.is_video_processed(vid):
                     logger.info(f"检测到重复作品（视频 ID {vid} 已处理过），跳过: {cand.url}")
+                    state.mark_settled(cand.msg_fp)
+                    receiver.mark_inflight_done(cand.msg_fp)
                     continue
 
                 # 与上一次解析保持最小间隔，避免请求过于频繁
@@ -197,6 +201,8 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
                         if video_id:
                             state.mark_video_processed(video_id, video_url, str(outcome.archive.dir))
                     state.clear_failures(fp)
+                    state.mark_settled(cand.msg_fp)
+                    receiver.mark_inflight_done(cand.msg_fp)
                     logger.success(
                         f"解析完成 ✅ 已归档: {outcome.archive.dir} "
                         f"（{len(outcome.archive.files)} 个文件）"
@@ -215,10 +221,13 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
                     attempts = state.record_failure(fp, error)
                     if attempts >= MAX_PARSE_ATTEMPTS:
                         state.mark_gave_up(fp, cand.url, error)
+                        state.mark_settled(cand.msg_fp)
+                        receiver.mark_inflight_done(cand.msg_fp)
                         logger.error(f"已失败 {attempts} 次，放弃: {cand.url} —— {error}")
                     else:
                         # 撤销消息的"已识别"标记，下一轮重新提取并重试
                         state.unmark_seen_message(cand.msg_fp)
+                        receiver.mark_inflight_done(cand.msg_fp)
                         logger.warning(
                             f"处理失败（第 {attempts}/{MAX_PARSE_ATTEMPTS} 次，稍后自动重试）: "
                             f"{cand.url} —— {error}"

@@ -228,6 +228,8 @@ class DouyinWebReceiver:
         self._warned_conv_lock: bool = False
         # 上次输出到日志的二维码内容指纹（内容没变不重复输出 base64/字符画）
         self._last_qr_fp: str = ""
+        # 当前进程内「正在处理」的消息指纹（用于区分"上次中断"与"本轮处理中"）
+        self._inflight: set[str] = set()
 
     # ══════════════════════ 生命周期 ══════════════════════
 
@@ -1125,6 +1127,10 @@ class DouyinWebReceiver:
         self._force_poll = False
         return value
 
+    def mark_inflight_done(self, fp: str) -> None:
+        """消息处理结束（成功/放弃/跳过），从"处理中"集合移除。"""
+        self._inflight.discard(fp)
+
     # ────────────── 重复作品日志去重 ──────────────
 
     def _log_duplicate(self, key: str, reason: str) -> None:
@@ -1298,9 +1304,17 @@ class DouyinWebReceiver:
             candidates: list[IncomingCandidate] = []
             for fp, url in self._collect_payload_candidates():
                 if self.state.is_seen_message(fp):
-                    self._log_duplicate(fp, f"{url}（此前已识别过的转发）")
-                    continue
+                    if self.state.is_settled(fp):
+                        # 已有定论（成功/放弃/首轮水位跳过）：不再处理
+                        self._log_duplicate(fp, f"{url}（此前已处理过的转发）")
+                        continue
+                    if fp in self._inflight:
+                        # 本轮/本进程正在解析中（下载耗时可能跨多轮轮询）：避免重复
+                        continue
+                    # 已识别但既无定论、又不在处理中 → 上次被中断（解析前/下载中重启），恢复处理
+                    logger.info(f"恢复未完成的消息（上次被中断，重启后补处理）: {url}")
                 self.state.mark_seen_message(fp)
+                self._inflight.add(fp)
                 candidates.append(IncomingCandidate(url=url, source="api", msg_fp=fp))
                 logger.info(f"从消息数据中发现转发链接: {url}")
         else:
@@ -1331,6 +1345,11 @@ class DouyinWebReceiver:
             self.state.set_flag("history_initialized", True)
             self.state.save()
             if not self.settings.process_history:
+                # 把这些历史消息标记为「已定论」，重启后也不会被误当作"中断"而补处理
+                for cand in candidates:
+                    self.state.mark_settled(cand.msg_fp)
+                    self._inflight.discard(cand.msg_fp)
+                self.state.save()
                 if candidates:
                     logger.info(f"首次运行：已跳过 {len(candidates)} 条历史转发（只处理今后新转发的视频；如需处理历史可设 DOUYIN_PROCESS_HISTORY=true 后重置 state.json）")
                 else:
