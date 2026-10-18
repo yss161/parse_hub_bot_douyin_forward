@@ -187,11 +187,18 @@ python run.py serve
 | `python run.py serve --once` | 只执行一轮轮询后退出（调试登录/收信） |
 | `python run.py login` | 仅扫码登录小号后退出 |
 | `python run.py test-url <链接>` | 不启动浏览器，直接验证解析链路是否可用（排障用） |
+| `python run.py export-cookie` | 从小号登录态自动导出抖音 cookie 并同步到解析端（即时生效） |
+| `python run.py cookie-config <set/clear/from-file/show>` | 手动管理解析端抖音 cookie |
 
 排障示例：
 
 ```bash
 python run.py test-url "https://v.douyin.com/xxxxxxx/"
+# 解析端 cookie 管理示例
+python run.py cookie-config show                       # 查看当前（值已掩码）
+python run.py cookie-config set "a=b; c=d"             # 手动设置一条
+python run.py cookie-config from-file cookie.txt       # 从文件导入（每行一条）
+python run.py cookie-config clear                      # 清空（改走移动端接口）
 ```
 
 ---
@@ -290,6 +297,8 @@ echo "123456 go" > forwarder_data/agent_cmd.txt  # 填入并回车提交（一�
 | `FORWARDER_SKIP_MEDIA_PROCESSING` | `true` | 跳过原项目的媒体处理（转码等），归档原始文件；设 `false` 需装 ffmpeg |
 | `TG_PUSH` | `false` | 是否推送解析结果到 Telegram 群组/频道（见下文专节） |
 | `TG_TARGET_CHAT` | 空 | 推送目标：`@用户名`／`-100...` 数字 ID／t.me 链接 |
+| `FORWARDER_SAVE_METADATA` | `true` | 归档目录写入 `metadata.json` |
+| `FORWARDER_AUTO_SYNC_COOKIE` | `false` | 每次启动（小号登录后）自动把小号 cookie 同步到解析端（手动同步一次：`python run.py export-cookie`） |
 | `FORWARDER_CLEANUP_AFTER_PUSH` | `true` | 推送成功后删除本地归档目录 |
 | `FORWARDER_CACHE_TTL_HOURS` | `72` | 本地缓存保留时长（小时）；`0` = 关闭定时清理 |
 | `FORWARDER_SHOT_PORT` | `8765` | 登录预览 HTTP 端口（0 = 关闭；截图/菜单查看用） |
@@ -297,24 +306,27 @@ echo "123456 go" > forwarder_data/agent_cmd.txt  # 填入并回车提交（一�
 | `DOUYIN_HEADLESS` | `true` | 无头模式；本机调试可设 `false` 观察浏览器 |
 | `FORWARDER_DUMP_HTML` | `false` | 提取失败时转储页面 HTML 到 `forwarder_data/debug/`（调选择器用） |
 
-### 可选：为「解析」配置抖音 Cookie / 代理
+### 可选：为「解析」配置抖音 Cookie
 
-解析能力完全来自原项目，原项目的平台配置同样生效：编辑
-`parse_hub_bot/data/config/platform_config.yaml`（不存在则新建）：
+解析能力完全来自原项目，抖音解析 cookie 存 `parse_hub_bot/data/config/platform_config.yaml`。**三种配置方式**：
 
-```yaml
-# 全局默认代理（国内直连抖音时可禁用）
-platforms:
-  douyin:
-    disable_parser_proxy: true
-    disable_downloader_proxy: true
-    # 如需提高解析稳定性，可补充抖音网页版 Cookie（可选）
-    # cookies:
-    #   - "你的抖音网页版 Cookie"
+| 方式 | 做法 | 适用 |
+| --- | --- | --- |
+| ① 不填（默认） | 什么都不用做 | 公开视频，解析走移动端接口，通常够用 |
+| ② 自动同步（推荐） | `.env` 设 `FORWARDER_AUTO_SYNC_COOKIE=true`，之后每次启动自动把小号 cookie 同步给解析端；登录后也可手动 `python run.py export-cookie` | 想更稳、抗风控，又不想维护 cookie |
+| ③ 手动填 | `python run.py cookie-config set "a=b; c=d"`（或 `from-file cookie.txt`） | 想用指定账号（如大号）的 cookie |
+
+```bash
+# 手动方式等价于直接编辑 platform_config.yaml：
+python run.py cookie-config set "sessionid=xxx; sid_tt=xxx"
+python run.py cookie-config show      # 查看（值已掩码）
+python run.py cookie-config clear     # 清空，改回移动端接口
 ```
 
-> 说明：接收端（小号登录、收私信）与解析端（parsehub 拉取视频信息）是两条独立的通道；
-> 解析端不配置 Cookie 通常也能解析公开视频，配置后更稳。
+> 说明：
+> - 接收端（小号登录、收私信）与解析端（parsehub 拉取视频信息）是**两条独立的通道**，cookie 互不相通；
+> - 不填 cookie 也能解析公开视频，填了优先走网页端接口、更稳；
+> - 写入通过原项目自带热更新**即时生效**，无需重启服务。
 
 ---
 

@@ -77,6 +77,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p_test.add_argument("url", help="抖音视频链接（支持短链）")
     p_test.add_argument("--no-download", action="store_true", help="只解析不下载")
 
+    sub.add_parser("export-cookie", help="从小号登录态自动导出抖音 cookie 并同步到解析端")
+
+    p_cc = sub.add_parser("cookie-config", help="解析端抖音 cookie 管理（set/clear/from-file/show）")
+    cc_sub = p_cc.add_subparsers(dest="cc_action")
+    p_set = cc_sub.add_parser("set", help="手动设置一条 cookie 字符串")
+    p_set.add_argument("value", help="cookie 字符串，如 'a=b; c=d'")
+    cc_sub.add_parser("clear", help="清空抖音解析 cookie（改走移动端接口）")
+    p_file = cc_sub.add_parser("from-file", help="从文件导入 cookie（每行一条）")
+    p_file.add_argument("path", help="cookie 文件路径")
+    cc_sub.add_parser("show", help="查看当前解析端 cookie（值已掩码）")
+
     sub.add_parser("doctor", help="环境自检（依赖 / 配置 / 登录态）")
 
     return parser
@@ -134,7 +145,7 @@ def main() -> None:
     from log import setup_logging  # noqa: E402
 
     from forwarder.config import ForwarderSettings  # noqa: E402
-    from forwarder.main import run_login, run_service, run_test_url  # noqa: E402
+    from forwarder.main import run_cookie_config, run_export_cookie, run_login, run_service, run_test_url  # noqa: E402
 
     args = _build_arg_parser().parse_args()
     settings = ForwarderSettings()
@@ -155,6 +166,12 @@ def main() -> None:
         asyncio.run(run_login(settings))
     elif mode == "test-url":
         asyncio.run(run_test_url(args.url, download=not args.no_download, settings=settings))
+    elif mode == "export-cookie":
+        asyncio.run(run_export_cookie(settings))
+    elif mode == "cookie-config":
+        action = args.cc_action or "show"
+        value = getattr(args, "value", "") or getattr(args, "path", "") or ""
+        asyncio.run(run_cookie_config(action, value, settings))
 
 
 if __name__ == "__main__":

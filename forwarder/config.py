@@ -116,6 +116,9 @@ class ForwarderSettings:
     # 跳过原项目的 TG 媒体处理（转码/长图切割），归档原始文件（推荐，速度更快）
     skip_media_processing: bool = field(default_factory=lambda: _env_bool("FORWARDER_SKIP_MEDIA_PROCESSING", True))
     save_metadata: bool = field(default_factory=lambda: _env_bool("FORWARDER_SAVE_METADATA", True))
+    # 每次服务启动（小号登录成功后）自动把小号登录态 cookie 同步到解析端 platform_config
+    # （解决"手动/一次性填的 cookie 会过期"的问题；可选，默认关闭）
+    auto_sync_cookie: bool = field(default_factory=lambda: _env_bool("FORWARDER_AUTO_SYNC_COOKIE", False))
 
     # ─────────────── 调试 ───────────────
     debug: bool = field(default_factory=lambda: _env_bool("FORWARDER_DEBUG", False))
@@ -156,6 +159,7 @@ class ForwarderSettings:
             f"  输出目录         : {self.output_dir}",
             f"  跳过媒体处理     : {self.skip_media_processing}",
             f"  TG 推送          : {('已启用 → ' + self.tg_target) if self.tg_push else '未启用'}",
+            f"  解析 cookie 自动同步: {self.auto_sync_cookie}（启动时把小号 cookie 同步到解析端）",
             f"  推送后清缓存     : {self.cleanup_after_push}（仅推送成功时执行）",
             f"  缓存保留时长     : {self.cache_ttl_hours}h（0 = 关闭定时清理）",
             f"  登录预览端口     : {self.shot_port}（0 = 关闭；截图/菜单查看用）",

@@ -117,9 +117,37 @@ sudo bash /opt/douyin_download_bot/deploy/configure_accounts.sh
 MONITOR_MODE=single MONITOR_ACCOUNTS="我的大号" sudo -E bash deploy/install_ubuntu.sh
 # 多会话
 MONITOR_MODE=multi  MONITOR_ACCOUNTS="小明,小红" sudo -E bash deploy/install_ubuntu.sh
+# 解析端 cookie 方式（第二个交互；none/auto/set/file/keep）
+PARSER_COOKIE_MODE=auto sudo -E bash deploy/install_ubuntu.sh
 ```
 
 以 root 运行时脚本会自动创建并切换服务用户（默认 `douyin`）；已有 sudo 的普通用户直接运行即可，服务将以该用户运行。
+
+### 第二个交互：解析端 Cookie 配置
+
+监测模式选完后，脚本会继续问「解析端用什么 cookie」（影响解析稳定性/抗风控，**公开视频通常不需要**）：
+
+```
+──────────────────────────────────────────────
+ 解析端 Cookie 配置（影响解析稳定性/抗风控；公开视频通常不需要）
+   1) 不填 cookie（默认，走移动端接口，公开视频够用）
+   2) 自动从小号登录态导出（推荐：登录后同步；可选每次启动自动同步）
+   3) 手动粘贴 cookie 字符串
+   4) 从文件导入 cookie（每行一条）
+   5) 保持现状
+ 请选择 [1/2/3/4/5]（回车默认 1）:
+──────────────────────────────────────────────
+```
+
+- **选 1**（默认）：解析走移动端接口，不依赖登录态——大多数公开视频都能解析；
+- **选 2（推荐）**：开启「每次启动自动把小号 cookie 同步到解析端」，一劳永逸（解决手动 cookie 会过期的问题）；
+  登录完成后可先手动同步一次：`sudo -u douyin -H .venv/bin/python run.py export-cookie`；
+- **选 3**：粘贴一段抖音网页 cookie（浏览器 `F12 → Application → Cookies` 拼成 `a=b; c=d` 形式）；
+- **选 4**：从 `cookie.txt`（每行一条）批量导入；
+- 已部署后随时重配：`sudo bash /opt/douyin_download_bot/deploy/configure_parser_cookie.sh`。
+
+> 原理：解析端与接收端（小号）是**两条独立通道**，cookie 存 `parse_hub_bot/data/config/platform_config.yaml`。
+> 不填 cookie = 走移动端接口；填了 = 优先走网页端接口（更稳）。写入通过原项目自带的热更新**即时生效**，无需重启。
 
 **可选环境变量**：
 
@@ -489,6 +517,7 @@ echo menu        | sudo tee /opt/douyin_download_bot/forwarder_data/agent_cmd.tx
 | `FORWARDER_PARSE_MIN_INTERVAL` | `8` | 两次解析最小间隔（秒），防频繁请求 |
 | `FORWARDER_SKIP_MEDIA_PROCESSING` | `true` | 跳过转码、归档原始文件；`false` 需装 ffmpeg |
 | `FORWARDER_SAVE_METADATA` | `true` | 归档目录写入 `metadata.json` |
+| `FORWARDER_AUTO_SYNC_COOKIE` | `false` | 每次启动（小号登录后）自动把小号 cookie 同步到解析端（手动同步一次：`python run.py export-cookie`） |
 | `FORWARDER_CLEANUP_AFTER_PUSH` | `true` | TG 推送成功即删除本地归档 |
 | `FORWARDER_CACHE_TTL_HOURS` | `72` | 本地缓存保留时长（小时）；`0` = 关闭定时清理 |
 

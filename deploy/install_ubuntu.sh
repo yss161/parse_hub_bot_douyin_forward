@@ -13,11 +13,13 @@
 #      （默认腾讯云 PyPI 镜像，失败自动回退官方源）
 #   3. 安装 Playwright Chromium 浏览器
 #   4. 生成 .env（若不存在），并交互式选择监测模式：单会话 / 多会话（可输入多个昵称）
-#   5. 安装 systemd 服务（不自动启动）
+#   5. 交互式选择解析端 cookie 方式：不填 / 自动同步 / 手动粘贴 / 从文件导入
+#   6. 安装 systemd 服务（不自动启动）
 #
-# 非交互式部署可用环境变量预设监测配置：
+# 非交互式部署可用环境变量预设：
 #   MONITOR_MODE=single MONITOR_ACCOUNTS="我的大号"  bash deploy/install_ubuntu.sh
 #   MONITOR_MODE=multi  MONITOR_ACCOUNTS="小明,小红" bash deploy/install_ubuntu.sh
+#   PARSER_COOKIE_MODE=none|auto|set|file|keep   # 解析端 cookie（可配 PARSER_COOKIE / PARSER_COOKIE_FILE）
 #
 # 完成后请按脚本末尾提示，先完成首次登录，再启动服务。
 # ============================================================
@@ -152,6 +154,12 @@ if ! bash "$SCRIPT_DIR/configure_accounts.sh"; then
   warn "监测账号配置未完成 —— 可稍后运行: bash $PROJECT_DIR/deploy/configure_accounts.sh"
 fi
 
+# 交互式选择解析端 cookie 方式：不填 / 自动同步 / 手动 / 从文件 / 保持
+# （非交互式环境自动跳过；可用 PARSER_COOKIE_MODE 环境变量预设）
+if ! bash "$SCRIPT_DIR/configure_parser_cookie.sh"; then
+  warn "解析端 cookie 配置未完成 —— 可稍后运行: bash $PROJECT_DIR/deploy/configure_parser_cookie.sh"
+fi
+
 if [ "$(id -u)" -eq 0 ]; then
   chown -R "$RUN_AS:$RUN_AS" "$PROJECT_DIR"
 fi
@@ -201,6 +209,7 @@ cat <<EOF
  其他：
    编辑配置     : $PROJECT_DIR/.env
    重配监测账号 : sudo bash $PROJECT_DIR/deploy/configure_accounts.sh   # 单会话 / 多会话交互选择
+   重配解析Cookie: sudo bash $PROJECT_DIR/deploy/configure_parser_cookie.sh  # 不填/自动/手动/文件
    运行中换账号 : echo "新昵称" | sudo tee $PROJECT_DIR/forwarder_data/agent_cmd.txt   # 免重启即时生效
    重启服务     : sudo systemctl restart $SERVICE_NAME
    更新浏览器   : sudo -u $RUN_AS -H $VENV_DIR/bin/playwright install chromium

@@ -26,6 +26,7 @@ from typing import Any
 from log import logger
 
 from .config import ForwarderSettings, split_accounts
+from .cookie_config import apply_cookies, clear_cookies, current_cookies, export_from_browser, mask_cookie
 from .douyin_web import DouyinWebReceiver
 from .parser_bridge import parse_url
 from .reporter import LogStatusReporter
@@ -139,6 +140,17 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
     await receiver.start()
     if settings.tg_push:
         await pusher.start()
+    # 可选：每次启动（小号登录成功后）自动把小号 cookie 同步到解析端（解决手动 cookie 过期问题）
+    if settings.auto_sync_cookie:
+        try:
+            cookie = await export_from_browser(receiver)
+            if cookie:
+                await apply_cookies([cookie])
+                logger.success("已自动把小号登录态 cookie 同步到解析端 ✅")
+            else:
+                logger.warning("自动同步解析 cookie 失败：未从小号浏览器获取到 cookie")
+        except Exception as e:
+            logger.warning(f"自动同步解析 cookie 异常（忽略，不影响运行）: {e}")
     if once:
         logger.info("启动完成（--once：只执行一轮轮询）")
 
@@ -304,3 +316,74 @@ async def run_test_url(url: str, *, download: bool = True, settings: ForwarderSe
         f"  类型     : {getattr(pr, 'type', '')}\n"
         + (f"  归档目录 : {outcome.archive.dir}（{len(outcome.archive.files)} 个文件）" if outcome.archive else "  （仅解析模式，未下载）")
     )
+
+
+# ══════════════════════════ 模式四：导出小号 cookie 到解析端 ══════════════════════════
+
+
+async def run_export_cookie(settings: ForwarderSettings | None = None) -> None:
+    """启动已登录的小号浏览器，把其抖音 cookie 自动同步到解析端 platform_config。"""
+    settings = settings or ForwarderSettings()
+    settings.ensure_dirs()
+    receiver = DouyinWebReceiver(settings, StateStore(settings.state_file))
+    try:
+        await receiver.start()  # 启动浏览器并确保登录（未登录会进入扫码流程）
+        cookie = await export_from_browser(receiver)
+        if not cookie:
+            logger.error("未能从小号浏览器获取抖音 cookie（可能尚未登录成功）")
+            raise SystemExit(1)
+        await apply_cookies([cookie])
+        logger.success("已自动从小号登录态导出 cookie 并填入解析端 ✅（即时生效）")
+    finally:
+        await receiver.close()
+
+
+# ══════════════════════════ 模式五：解析端 cookie 管理 ══════════════════════════
+
+
+async def run_cookie_config(
+    action: str,
+    value: str = "",
+    settings: ForwarderSettings | None = None,
+) -> None:
+    """解析端抖音 cookie 的增删查（不启动浏览器，直接操作原项目 platform_config）。"""
+    settings = settings or ForwarderSettings()
+    settings.ensure_dirs()
+
+    if action == "show":
+        cookies = current_cookies()
+        if not cookies:
+            print("当前解析端抖音 cookie：未配置（走移动端接口）")
+            return
+        print(f"当前解析端抖音 cookie：{len(cookies)} 条")
+        for i, c in enumerate(cookies, 1):
+            print(f"  [{i}] {mask_cookie(c)}")
+        return
+
+    if action == "clear":
+        await clear_cookies()
+        return
+
+    if action == "set":
+        if not value.strip():
+            logger.error("set 需要提供 cookie 字符串，如: python run.py cookie-config set 'a=b; c=d'")
+            raise SystemExit(1)
+        await apply_cookies([value])
+        return
+
+    if action == "from-file":
+        from pathlib import Path
+
+        p = Path(value.strip())
+        if not p.exists():
+            logger.error(f"文件不存在: {p}")
+            raise SystemExit(1)
+        lines = [ln.strip() for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        if not lines:
+            logger.error(f"文件为空: {p}")
+            raise SystemExit(1)
+        await apply_cookies(lines)
+        return
+
+    logger.error(f"未知动作: {action}")
+    raise SystemExit(1)
