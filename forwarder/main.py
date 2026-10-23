@@ -122,6 +122,19 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
 
     state = StateStore(settings.state_file)
     receiver = DouyinWebReceiver(settings, state)
+    logger.info(
+        f"检测模式: {receiver.effective_detect_mode}"
+        + ("（DOM 探针 + 定期强制取数 + 自愈刷新）" if receiver.effective_detect_mode == "probe"
+           else "（每轮整页刷新）")
+        + f"；轮询间隔 {receiver.poll_interval():g}s"
+        + ("（控制台设置，优先于 .env；mode reset 可恢复）" if state.get_value("detect_mode") else "（.env 默认）")
+    )
+    _mode_override = state.get_value("detect_mode")
+    if _mode_override and _mode_override != settings.normalized_detect_mode():
+        logger.warning(
+            f"检测模式使用控制台设置: {receiver.effective_detect_mode}"
+            f"（.env 为 {settings.normalized_detect_mode()}）；如需恢复 .env 默认，往 agent_cmd.txt 写 mode reset"
+        )
     reporter = LogStatusReporter("Pipeline")
     pusher = TgPusher(settings)
 
@@ -256,8 +269,11 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
                 logger.info("控制台触发：立即执行下一轮检查")
                 await asyncio.sleep(1.0)
             else:
-                wait = max(1.0, settings.poll_interval - elapsed)
-                logger.debug(f"本轮结束（耗时 {elapsed:.1f}s），{wait:.0f}s 后进入下一轮")
+                wait = max(1.0, receiver.poll_interval() - elapsed)
+                logger.debug(
+                    f"本轮结束（耗时 {elapsed:.1f}s，模式 {receiver.effective_detect_mode}），"
+                    f"{wait:.0f}s 后进入下一轮"
+                )
                 await asyncio.sleep(wait)
 
             # 定时缓存清理（默认每小时检查一次；保留时长见 FORWARDER_CACHE_TTL_HOURS）

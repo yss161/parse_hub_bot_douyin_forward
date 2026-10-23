@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import html as html_lib
+import json
 import random
 import re
 import time
@@ -149,6 +150,37 @@ CONVERSATION_MARKER_RE = re.compile(r"#\d{1,2}(?::\d{1,25}){1,4}")
 # 接口请求体（protobuf 二进制）中的会话 ID（ASCII 形式，如 0:1:67269605150:7525653966451180602）
 CONVERSATION_ID_RE = re.compile(rb"\d{1,3}:\d{1,3}:\d{6,25}(?::\d{6,25})?")
 
+
+# probe 模式探针：一次 evaluate 读取「会话列表 + 消息区尾部」，不发网络请求
+PROBE_SCRIPT = r"""
+() => {
+  const convSel = "[class*='ConversationItemwrapper'],[class*='conversationConversationItem'],"
+    + "[class*='conversation-item'],[class*='conversationItem'],[class*='session-item'],[class*='chat-item']";
+  const msgSel = "[class*='messageMessageBoxmessageBox'],[class*='MessageBoxContentcolumnBox'],"
+    + "[class*='message-item'],[class*='chat-message'],[class*='msg-item']";
+  const timeRe = /(\d+\s*(?:秒|分钟|小时|天)前|昨天|前天|刚刚|周[一二三四五六日]|\d{1,2}:\d{2}|\d{1,4}[\/-]\d{1,2}(?:[\/-]\d{1,2})?)/g;
+  const clean = (s) => (s || '').replace(/\s+/g, ' ').replace(timeRe, '').trim().slice(0, 160);
+  const convs = [...document.querySelectorAll(convSel)].slice(0, 40).map((el) => {
+    const unread = !!el.querySelector(
+      "[class*='unread'],[class*='badge'],[class*='reddot'],[class*='red-dot']"
+    );
+    return clean(el.innerText) + (unread ? '|u' : '');
+  });
+  const boxes = [...document.querySelectorAll(
+    "[class*='MessageListwrapper'],[class*='MessageListlist'],[class*='message-list'],"
+    + "[class*='messageList'],[class*='chat-content'],[class*='chatContent']"
+  )];
+  const box = boxes[boxes.length - 1];
+  let tail = '';
+  if (box) {
+    const msgs = box.querySelectorAll(msgSel);
+    const last = msgs[msgs.length - 1];
+    if (last) tail = clean(last.innerText).slice(0, 120);
+  }
+  return { n: convs.length, convs, tail };
+}
+"""
+
 # 登录态 cookie 名称
 SESSION_COOKIE_NAMES = {"sessionid", "sid_guard", "sid_tt", "sid_ucp_virtual"}
 
@@ -230,6 +262,12 @@ class DouyinWebReceiver:
         self._last_qr_fp: str = ""
         # 当前进程内「正在处理」的消息指纹（用于区分"上次中断"与"本轮处理中"）
         self._inflight: set[str] = set()
+        # ── 检测模式（probe / B 方案）运行状态 ──
+        self._last_probe_sig: str = ""
+        self._last_force_fetch_ts: float = time.monotonic()
+        self._last_reload_ts: float = time.monotonic()
+        self._probe_failures: int = 0
+        self._empty_probe_count: int = 0
 
     # ══════════════════════ 生命周期 ══════════════════════
 
@@ -238,6 +276,16 @@ class DouyinWebReceiver:
         await self._ensure_browser()
         self._start_shots()
         await self.ensure_login()
+        now = time.monotonic()
+        self._last_reload_ts = now
+        self._last_force_fetch_ts = now
+        _mode = self.effective_detect_mode
+        _source = "控制台设置，优先于 .env" if self.state.get_value("detect_mode") else ".env 默认"
+        logger.info(
+            f"检测模式: {_mode}"
+            + ("（DOM 探针 + 定期强制取数 + 自愈刷新）" if _mode == "probe" else "（每轮整页刷新）")
+            + f"；轮询间隔 {self.poll_interval():g}s；来源: {_source}"
+        )
 
     async def close(self) -> None:
         if self._shots is not None:
@@ -359,14 +407,19 @@ class DouyinWebReceiver:
             return
         if not text:
             return
+        # 无论大小都记录会话标记（用于锁定目标会话）
+        for m in CONVERSATION_MARKER_RE.finditer(text):
+            self._record_conv_id(m.group(0)[1:])
+        # 只有这两个接口返回「完整消息正文」（含分享卡片 itemId）；
+        # get_user_message 等小响应是心跳/状态，不进入候选缓存，避免误判"取数成功"
+        url = response.url
+        if "get_by_conversation" not in url and "get_message_by_init" not in url:
+            return
         self._msg_payloads.append((time.monotonic(), text))
         # 只保留最近 5 分钟、最多 10 条
         cutoff = time.monotonic() - 300
         self._msg_payloads = [p for p in self._msg_payloads if p[0] >= cutoff][-10:]
-        # 顺带记录响应里出现的会话标记（用于兜底识别目标会话）
-        for m in CONVERSATION_MARKER_RE.finditer(text):
-            self._record_conv_id(m.group(0)[1:])
-        logger.debug(f"已捕获消息接口数据: {response.url.split('?')[0]}（{len(text)} 字符）")
+        logger.debug(f"已捕获消息接口数据: {url.split('?')[0]}（{len(text)} 字符）")
 
     def _collect_payload_candidates(self) -> list[tuple[str, str]]:
         """从已捕获的接口数据中提取候选：(指纹, 链接)。
@@ -788,7 +841,15 @@ class DouyinWebReceiver:
             )
             return True
 
-        # 3) 编号选项（登录菜单）：回复数字即点击对应按钮
+        # 3) 检测模式（reload / probe）：免重启切换
+        m = re.fullmatch(
+            r"(?:mode|模式|detect|检测模式)\s*(reload|probe|a|b|轮询|探针|reset|重置|default|默认)?",
+            low,
+        )
+        if m:
+            return self._handle_mode_command((m.group(1) or "").strip())
+
+        # 4) 编号选项（登录菜单）：回复数字即点击对应按钮
         if re.fullmatch(r"\d{1,2}", low):
             n = int(low)
             if self._login_options:
@@ -799,7 +860,7 @@ class DouyinWebReceiver:
             self._log_console_help()
             return True
 
-        # 4) 纯数字验证码：自动填入（可选 go 回车提交）
+        # 5) 纯数字验证码：自动填入（可选 go 回车提交）
         m = re.fullmatch(r"(\d{4,8})(?:\s+(go|enter|回车|提交))?", low)
         if m:
             if page is None:
@@ -813,32 +874,32 @@ class DouyinWebReceiver:
                 logger.info("已回车提交验证码")
             return True
 
-        # 5) 刷新页面截图
+        # 6) 刷新页面截图
         if low in ("刷新", "refresh"):
             await self._capture_qr(self.settings.qr_image_path)
             await self._snapshot_login_page()
             logger.info(f"已刷新页面截图: {self._shot_link('login_page_state.png')}")
             return True
 
-        # 6) 立即执行下一轮
+        # 7) 立即执行下一轮
         if low in ("force", "now", "立即", "现在"):
             self._force_poll = True
             logger.info("已记录：本轮结束后立即执行下一轮检查")
             return True
 
-        # 7) 兼容旧版自由指令
+        # 8) 兼容旧版自由指令
         legacy = await self._run_legacy_command(line)
         if legacy is not None:
             return legacy
 
-        # 8) 页面上的编号选项若能被文本直接命中，也允许按文本点击（免记编号）
+        # 9) 页面上的编号选项若能被文本直接命中，也允许按文本点击（免记编号）
         if self._login_options and page is not None:
             for label, _note in self._login_options:
                 if label != _REFRESH_OPTION and label and label in line:
                     await self._click_login_option(label)
                     return True
 
-        # 9) 其它纯文本 = 设置"监测账号"（支持多个；对话式添加，免指令、免重启）
+        # 10) 其它纯文本 = 设置"监测账号"（支持多个；对话式添加，免指令、免重启）
         raw = line.strip()
         if not raw or len(raw) > 200:
             raise RuntimeError("无法识别的输入（长度需 1~200 字符）")
@@ -871,6 +932,51 @@ class DouyinWebReceiver:
             "输入 reset 可恢复 .env 默认值）"
         )
         return True
+
+    def _handle_mode_command(self, arg: str) -> bool:
+        """检测模式查看/切换（reload=现状，probe=B 方案）。"""
+        arg = (arg or "").strip().lower()
+        if arg in ("", "status", "状态"):
+            self._log_mode_help()
+            return True
+        if arg in ("reset", "重置", "default", "默认"):
+            self.state.clear_value("detect_mode")
+            self.state.save()
+            self._reset_probe_state()
+            logger.success(
+                f"检测模式已恢复 .env 默认: {self.settings.normalized_detect_mode()}（下一轮生效）"
+            )
+            self._log_mode_help()
+            return True
+        if arg in ("reload", "a", "轮询", "全量", "重载"):
+            self.state.set_value("detect_mode", "reload")
+            self.state.save()
+            self._reset_probe_state()
+            logger.success("检测模式已切换为 reload（每轮整页刷新；实时性最好，资源消耗高；下一轮生效）")
+            self._log_mode_help()
+            return True
+        if arg in ("probe", "b", "探针", "轻量"):
+            self.state.set_value("detect_mode", "probe")
+            self.state.save()
+            self._reset_probe_state()
+            logger.success("检测模式已切换为 probe（DOM 探针 + 定期强制取数；省资源；下一轮生效）")
+            self._log_mode_help()
+            return True
+        raise RuntimeError("用法: mode reload | mode probe | mode reset")
+
+    def _log_mode_help(self) -> None:
+        """输出检测模式说明（含当前参数）。"""
+        mode = self.effective_detect_mode
+        source = "控制台设置" if self.state.get_value("detect_mode") else ".env 默认"
+        lines = [
+            f"【检测模式】当前: {mode}（来源: {source}）",
+            "  reload（现状）：每轮 page.reload 整页刷新 → 实时性最好、最稳；实测每轮约 250 请求 / 30 秒",
+            "  probe （B 方案）：DOM 探针 + 定期强制取数 + 自愈刷新 → 请求量约降 95%+；最坏延迟约一个取数周期",
+            "  切换（免重启，下一轮生效）: mode reload | mode probe | mode reset",
+            f"  当前参数: 探针 {self.settings.probe_interval}s / 强制取数 {self.settings.force_fetch_interval}s"
+            f" / 自愈 {self.settings.reload_interval}s（连续失败 {self.settings.reload_on_failures} 次）",
+        ]
+        logger.info("\n" + "\n".join(lines))
 
     async def _run_legacy_command(self, line: str) -> bool | None:
         """兼容旧版自由指令；非旧指令返回 None。"""
@@ -1053,6 +1159,7 @@ class DouyinWebReceiver:
             "  +昵称 / -昵称        → 追加 / 移除一个监测账号（多个用逗号分隔）",
             "  reset / 重置        → 清除自定义账号，恢复 .env 默认值",
             "  force / now / 立即  → 不等待轮询周期，立刻执行下一轮检查",
+            "  mode / 模式         → 查看/切换检测模式（mode reload | mode probe | mode reset，免重启）",
             "  菜单 / help         → 重新显示本说明",
             "  纯数字验证码(4~8位)  → 登录流程中填入验证码输入框；`123456 go` = 填入并回车",
             "  登录/验证页会自动给出编号菜单：把数字写入指令文件即可点击对应按钮",
@@ -1261,10 +1368,11 @@ class DouyinWebReceiver:
     # ══════════════════════ 轮询 ══════════════════════
 
     async def poll_once(self) -> list[IncomingCandidate]:
-        """执行一轮轮询，返回新发现的候选链接（已做消息级去重）。
+        """执行一轮检测，返回新发现的候选链接（已做消息级去重）。
 
-        优先使用拦截到的「私信消息接口数据」提取视频卡片 ID（准确、无需点击卡片）；
-        若未捕获到接口数据，则回退到 DOM 扫描。
+        检测模式（settings.detect_mode，可被控制台覆盖）：
+          - reload：现状——每轮 page.reload 整页刷新后提取（最稳、资源消耗高）；
+          - probe ：B 方案——DOM 探针 + 定期强制取数 + 自愈刷新（资源消耗低）。
         """
         await self._ensure_browser()
         assert self._page is not None and self._context is not None
@@ -1274,7 +1382,7 @@ class DouyinWebReceiver:
             logger.warning("登录态失效，重新扫码登录")
             await self.ensure_login()
 
-        # 远程控制台：随时可写输入（设置监测昵称 / 立即轮询 / menu 等，执行后自动删除）
+        # 远程控制台：随时可写输入（设置监测昵称 / 切换检测模式 / 立即轮询 / menu 等）
         try:
             await self._try_agent_cmd()
         except Exception as e:
@@ -1289,56 +1397,75 @@ class DouyinWebReceiver:
         # 防止上一轮打开过的视频仍在播放（自动播放/后台暂停会干扰后续操作）
         await self._stop_media()
 
-        # 刷新聊天页以重新拉取消息数据，并打开目标会话
+        if self.effective_detect_mode == "probe":
+            return await self._poll_probe()
+        return await self._poll_reload()
+
+    # ────────────── 检测模式：reload（现状） ──────────────
+
+    async def _poll_reload(self) -> list[IncomingCandidate]:
+        """现状模式：每轮整页刷新，重新拉取全部消息接口数据。"""
         payload_ok = await self._refresh_for_payload()
 
         if payload_ok:
-            # 接口数据可用：以接口数据为准（视频卡片 itemId + 文本链接）
-            accounts = self.effective_main_accounts
-            if accounts and not self._target_conv_ids and not self._warned_conv_lock:
-                self._warned_conv_lock = True
-                logger.warning(
-                    f"未能锁定目标会话 ID（监测昵称 {'、'.join(accounts)} 是否匹配到会话？"
-                    "可在控制台直接输入新的昵称来更换监测对象），本轮暂按全量扫描"
-                )
-            candidates: list[IncomingCandidate] = []
-            for fp, url in self._collect_payload_candidates():
-                if self.state.is_seen_message(fp):
-                    if self.state.is_settled(fp):
-                        # 已有定论（成功/放弃/首轮水位跳过）：不再处理
-                        self._log_duplicate(fp, f"{url}（此前已处理过的转发）")
-                        continue
-                    if fp in self._inflight:
-                        # 本轮/本进程正在解析中（下载耗时可能跨多轮轮询）：避免重复
-                        continue
-                    # 已识别但既无定论、又不在处理中 → 上次被中断（解析前/下载中重启），恢复处理
-                    logger.info(f"恢复未完成的消息（上次被中断，重启后补处理）: {url}")
-                self.state.mark_seen_message(fp)
-                self._inflight.add(fp)
-                candidates.append(IncomingCandidate(url=url, source="api", msg_fp=fp))
-                logger.info(f"从消息数据中发现转发链接: {url}")
+            candidates = self._collect_new_candidates()
         else:
-            # 回退：DOM 扫描（消息接口未捕获时）——逐个打开监测会话扫描
-            items = await self._conversation_items()
-            matched = await self._match_conversation_items(items)
-            if not matched:
-                logger.warning(
-                    "未找到私信会话。请检查：1) 大号是否已给小号发过消息；"
-                    "2) 监测昵称是否与大号昵称匹配（可在控制台直接输入昵称更新）；"
-                    "3) 必要时设置 FORWARDER_DUMP_HTML=true 转储页面排查。"
-                )
-                return []
-            candidates = []
-            for el, text in matched[:10]:
-                try:
-                    await el.click()
-                    await self._human_delay(1.2, 2.5)
-                    self._current_conv_text = text
-                except Exception as e:
-                    logger.debug(f"打开会话失败（跳过）: {e}")
-                    continue
-                candidates.extend(await self._scan_messages())
+            candidates = await self._scan_conversations_dom()
 
+        return self._finalize_candidates(candidates)
+
+    def _collect_new_candidates(self) -> list[IncomingCandidate]:
+        """从已捕获的接口数据中提取新候选（含消息级去重与 inflight 标记）。"""
+        accounts = self.effective_main_accounts
+        if accounts and not self._target_conv_ids and not self._warned_conv_lock:
+            self._warned_conv_lock = True
+            logger.warning(
+                f"未能锁定目标会话 ID（监测昵称 {'、'.join(accounts)} 是否匹配到会话？"
+                "可在控制台直接输入新的昵称来更换监测对象），本轮暂按全量扫描"
+            )
+        candidates: list[IncomingCandidate] = []
+        for fp, url in self._collect_payload_candidates():
+            if self.state.is_seen_message(fp):
+                if self.state.is_settled(fp):
+                    # 已有定论（成功/放弃/首轮水位跳过）：不再处理
+                    self._log_duplicate(fp, f"{url}（此前已处理过的转发）")
+                    continue
+                if fp in self._inflight:
+                    # 本轮/本进程正在解析中（下载耗时可能跨多轮轮询）：避免重复
+                    continue
+                # 已识别但既无定论、又不在处理中 → 上次被中断（解析前/下载中重启），恢复处理
+                logger.info(f"恢复未完成的消息（上次被中断，重启后补处理）: {url}")
+            self.state.mark_seen_message(fp)
+            self._inflight.add(fp)
+            candidates.append(IncomingCandidate(url=url, source="api", msg_fp=fp))
+            logger.info(f"从消息数据中发现转发链接: {url}")
+        return candidates
+
+    async def _scan_conversations_dom(self) -> list[IncomingCandidate]:
+        """回退：DOM 扫描（消息接口未捕获时）——逐个打开监测会话扫描。"""
+        items = await self._conversation_items()
+        matched = await self._match_conversation_items(items)
+        if not matched:
+            logger.warning(
+                "未找到私信会话。请检查：1) 大号是否已给小号发过消息；"
+                "2) 监测昵称是否与大号昵称匹配（可在控制台直接输入昵称更新）；"
+                "3) 必要时设置 FORWARDER_DUMP_HTML=true 转储页面排查。"
+            )
+            return []
+        candidates: list[IncomingCandidate] = []
+        for el, text in matched[:10]:
+            try:
+                await el.click()
+                await self._human_delay(1.2, 2.5)
+                self._current_conv_text = text
+            except Exception as e:
+                logger.debug(f"打开会话失败（跳过）: {e}")
+                continue
+            candidates.extend(await self._scan_messages())
+        return candidates
+
+    def _finalize_candidates(self, candidates: list[IncomingCandidate]) -> list[IncomingCandidate]:
+        """首轮水位处理 + 落盘，返回最终候选。"""
         # 首次运行：默认仅记录当前消息水位（避免把服务启动前的旧转发全部解析）；
         # 设置 DOUYIN_PROCESS_HISTORY=true 可改为处理历史消息。
         if not self.state.get_flag("history_initialized"):
@@ -1359,6 +1486,134 @@ class DouyinWebReceiver:
 
         self.state.save()
         return candidates
+
+    # ────────────── 检测模式：probe（B 方案） ──────────────
+
+    async def _poll_probe(self) -> list[IncomingCandidate]:
+        """B 方案：DOM 探针（0 请求）+ 定期强制取数 + 自愈刷新。
+
+        设计要点：
+          - 探针只读一次页面，不触发网络；无变化且未到取数周期 → 直接返回；
+          - 强制取数（默认 45s）保证"推送静默失效"时也能靠服务端重同步发现新消息；
+          - 连续取数失败 / 定期（默认 2h）自动 reload，避免页面状态长期漂移。
+        """
+        now = time.monotonic()
+
+        # 首次运行（或 state 被重置）：先完整刷新一次，建立历史水位（与 reload 模式一致）
+        if not self.state.get_flag("history_initialized"):
+            logger.info("检测模式=probe：首次运行先执行一次完整刷新（建立消息水位）")
+            return await self._poll_reload()
+
+        # 自愈：定期 reload / 连续取数失败 / 页面结构缺失
+        if self._should_self_heal(now):
+            await self._self_heal_reload()
+            return self._finalize_candidates(self._collect_new_candidates())
+
+        # 1) 廉价探针（0 网络请求）
+        sig = await self._probe_signature()
+        if not sig:
+            # evaluate 失败（页面可能卡死/正在导航）：累计失败，连续 3 次触发自愈
+            changed = False
+            self._empty_probe_count += 1
+        else:
+            self._empty_probe_count = 0
+            if not self._last_probe_sig:
+                # 进程启动/自愈后的第一次探针：只记录基线，不立即触发取数
+                # （页面加载本身已经拉过一轮接口数据，等强制取数周期再兜底）
+                changed = False
+            else:
+                changed = sig != self._last_probe_sig
+            self._last_probe_sig = sig
+
+        # 2) 是否到了强制取数时间（服务端重同步，兜住"推送静默失效"）
+        force_due = (now - self._last_force_fetch_ts) >= max(5, self.settings.force_fetch_interval)
+
+        if not changed and not force_due:
+            logger.debug("probe: 页面无变化，跳过本轮（0 请求）")
+            return []
+
+        # 3) 取数：点开目标会话，触发 get_by_conversation
+        pulled = await self._open_and_lock_conversations(precise=True)
+        if pulled:
+            self._last_force_fetch_ts = time.monotonic()
+            self._probe_failures = 0
+            # 取数后页面结构会变化（打开会话/已读角标消失），稍等 UI 稳定再刷新指纹，避免下一轮重复触发
+            await asyncio.sleep(0.6)
+            self._last_probe_sig = await self._probe_signature() or self._last_probe_sig
+            return self._finalize_candidates(self._collect_new_candidates())
+
+        # 4) 取数失败：探针有变化时用 DOM 扫描兜底；否则累计失败次数等待自愈
+        self._probe_failures += 1
+        if changed:
+            logger.debug("probe: 检测到页面变化但接口未返回，回退 DOM 扫描")
+            return self._finalize_candidates(await self._scan_conversations_dom())
+        logger.debug(f"probe: 强制取数未拿到接口数据（连续失败 {self._probe_failures} 次）")
+        return []
+
+    async def _probe_signature(self) -> str:
+        """读取一次页面结构指纹（会话列表 + 消息区最后一条），不发网络请求。"""
+        page = self._page
+        if page is None:
+            return ""
+        try:
+            data = await page.evaluate(PROBE_SCRIPT)
+        except Exception as e:
+            logger.debug(f"probe: 探针执行失败（{e}）")
+            return ""
+        if not isinstance(data, dict):
+            return ""
+        # 即使没有会话也返回稳定指纹（空列表），避免"账号本来就没消息"被误判为页面异常
+        return fingerprint(json.dumps(data, ensure_ascii=False, sort_keys=True))
+
+    def _should_self_heal(self, now: float) -> bool:
+        """是否需要自愈刷新（定期 / 连续失败 / 页面结构缺失）。"""
+        s = self.settings
+        page = self._page
+        if page is not None and "/chat" not in page.url and "/messages" not in page.url:
+            logger.warning(f"probe: 当前页面不在私信页（{page.url}），执行自愈刷新")
+            return True
+        if s.reload_interval > 0 and (now - self._last_reload_ts) >= s.reload_interval:
+            logger.info(f"probe: 距上次整页刷新已超过 {s.reload_interval}s，执行自愈刷新")
+            return True
+        if self._probe_failures >= max(1, s.reload_on_failures):
+            logger.warning(f"probe: 连续 {self._probe_failures} 次取数失败，执行自愈刷新")
+            return True
+        if self._empty_probe_count >= 3:
+            logger.warning("probe: 连续 3 次探针未读到会话列表（页面可能异常），执行自愈刷新")
+            return True
+        return False
+
+    async def _self_heal_reload(self) -> None:
+        """执行一次整页刷新并重置 probe 计时器。"""
+        await self._refresh_for_payload()
+        now = time.monotonic()
+        self._last_reload_ts = now
+        self._last_force_fetch_ts = now
+        # 刷新后重建指纹（页面结构已重置）
+        self._last_probe_sig = await self._probe_signature() or ""
+        self._probe_failures = 0
+        self._empty_probe_count = 0
+
+    @property
+    def effective_detect_mode(self) -> str:
+        """当前生效的检测模式：控制台覆盖（state）优先，其次 .env。"""
+        raw = (self.state.get_value("detect_mode") or self.settings.detect_mode or "reload").strip().lower()
+        return "probe" if raw in ("probe", "b", "planb", "plan_b", "探针", "轻量") else "reload"
+
+    def poll_interval(self) -> float:
+        """当前模式建议的轮询间隔（秒）。"""
+        if self.effective_detect_mode == "probe":
+            return float(max(3, self.settings.probe_interval))
+        return float(max(5, self.settings.poll_interval))
+
+    def _reset_probe_state(self) -> None:
+        """切换模式/重置后清空 probe 计时与计数。"""
+        now = time.monotonic()
+        self._last_probe_sig = ""
+        self._last_force_fetch_ts = now
+        self._last_reload_ts = now
+        self._probe_failures = 0
+        self._empty_probe_count = 0
 
     def _warn_captcha_throttled(self) -> None:
         """风控拦截提示（每 10 分钟最多一次）。"""
@@ -1442,28 +1697,34 @@ class DouyinWebReceiver:
             matched.append((items[0], await self._safe_text(items[0])))
         return matched
 
-    async def _open_and_lock_conversations(self) -> None:
+    async def _open_and_lock_conversations(self, *, precise: bool = False) -> bool:
         """逐个打开监测会话，并把它们的会话 ID 加入锁定集合。
 
-        消息接口数据按会话切段（`#会话ID`），锁定集合即"只提取这些会话段"的过滤条件，
-        其他会话/群聊的分享一律忽略。每次点击后取"新出现的最后一个会话 ID"作为该会话的 ID。
+        precise=True 用于 probe 模式：用 expect_response 精确等待消息接口（通常 0.4~1s），
+        不再固定 sleep；返回本轮是否真的拿到了接口数据。
         """
         page = self._page
         assert page is not None
         items = await self._conversation_items()
         if not items:
-            return
+            return False
         matched = await self._match_conversation_items(items)
+        start_ts = time.monotonic()
 
         newly_locked: list[tuple[str, str]] = []
         for el, text in matched[:10]:
             n_before = len(self._conv_id_events)
             try:
-                await el.click()
+                if precise:
+                    # 仅单会话时才做"点别的会话再点回来"的兜底，避免多账号场景多余点击
+                    others = [it for it in items if it is not el] if len(matched) == 1 else []
+                    await self._click_conversation_precise(el, others)
+                else:
+                    await el.click()
+                    await self._human_delay(1.5, 2.5)
             except Exception as e:
                 logger.debug(f"点击会话失败（跳过该会话）: {e}")
                 continue
-            await self._human_delay(1.5, 2.5)
             self._current_conv_text = text
             after = [cid for _ts, cid in self._conv_id_events[n_before:]]
             if not after:
@@ -1478,6 +1739,47 @@ class DouyinWebReceiver:
             logger.info(
                 f"已锁定 {len(self._target_conv_ids)} 个目标会话，仅处理这些会话内的转发: {detail}"
             )
+
+        if not precise:
+            return False
+
+        # 接口响应体是异步读取的，给它一点时间落库
+        for _ in range(20):
+            if any(ts >= start_ts for ts, _ in self._msg_payloads):
+                return True
+            await asyncio.sleep(0.15)
+        return any(ts >= start_ts for ts, _ in self._msg_payloads)
+
+    async def _click_conversation_precise(self, el: ElementHandle, others: list[ElementHandle]) -> None:
+        """点击会话并等待消息接口；若"已打开会话"不重新拉取，则先点别的会话再点回来。"""
+        if await self._click_and_wait_message(el):
+            return
+        for other in others[:1]:
+            try:
+                await other.click()
+                await asyncio.sleep(0.3)
+            except Exception:
+                continue
+            if await self._click_and_wait_message(el):
+                return
+
+    async def _click_and_wait_message(self, el: ElementHandle) -> bool:
+        """点击元素并等待消息接口响应（6 秒超时）。"""
+        page = self._page
+        if page is None:
+            return False
+        try:
+            async with page.expect_response(
+                lambda r: "imapi.douyin.com" in r.url
+                and ("/message/get_by_conversation" in r.url or "/message/get_message_by_init" in r.url),
+                timeout=6000,
+            ):
+                await el.click()
+            return True
+        except PlaywrightTimeoutError:
+            return False
+        except Exception:
+            return False
 
     async def _has_unread(self, item: ElementHandle) -> bool:
         for sel in UNREAD_BADGE_SELECTORS:

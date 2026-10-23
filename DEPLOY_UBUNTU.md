@@ -86,7 +86,7 @@ sudo APP_USER=douyin bash deploy/install_ubuntu.sh
 2. 检测 Python ≥ 3.12（不足则自动装 `python3.12`）；
 3. 创建虚拟环境 `.venv`，安装 `requirements-forwarder.txt`（默认**腾讯云 PyPI 镜像**，失败自动回退官方源）；
 4. 安装 Playwright Chromium 浏览器；
-5. 生成 `.env`（若不存在），并**交互式询问监测模式**（单会话 / 多会话，输入大号昵称后自动写入 .env）；
+5. 生成 `.env`（若不存在），并**交互式询问监测账号**（单会话 / 多会话）、**解析端 Cookie 方式**、**检测模式**（reload / probe），按选择写入 .env；
 6. 安装 systemd 服务 `douyin-forward`（**安装但不启动**）；
 7. 打印「首次登录 + 启动服务」的后续步骤。
 
@@ -149,11 +149,42 @@ PARSER_COOKIE_MODE=auto sudo -E bash deploy/install_ubuntu.sh
 > 原理：解析端与接收端（小号）是**两条独立通道**，cookie 存 `parse_hub_bot/data/config/platform_config.yaml`。
 > 不填 cookie = 走移动端接口；填了 = 优先走网页端接口（更稳）。写入通过原项目自带的热更新**即时生效**，无需重启。
 
+### 第三个交互：检测模式
+
+接着会问「用哪种方式发现新转发」（**解析结果完全一致**，只影响资源占用与检测延迟）：
+
+```
+──────────────────────────────────────────────
+ 检测模式：怎么发现「大号转发的新视频」？
+   当前配置: reload
+
+   1) reload（现状，默认）
+      每轮整页刷新 + 点开会话取接口数据
+      ✅ 实时性最好、最稳（推送失效也能发现）
+      ❌ 资源消耗高：实测每轮约 250 个请求 / 30 秒
+
+   2) probe（B 方案，省资源）
+      DOM 探针（0 请求）+ 每 45 秒强制取数 + 定期自愈刷新
+      ✅ 请求量约降 95%+；正常消息约 10 秒内发现
+      ❌ 推送静默失效时，最坏延迟约一个取数周期（默认 45 秒）
+
+   3) 保持不变（回车默认）
+──────────────────────────────────────────────
+```
+
+- **选 1（默认）**：与旧版行为完全一致；
+- **选 2**：写入 `DOUYIN_DETECT_MODE=probe` 及探针参数，适合长期挂机/低配服务器；
+- 已部署后随时重配：`sudo bash /opt/douyin_download_bot/deploy/configure_detect_mode.sh`；
+- 非交互部署：`DETECT_MODE=probe sudo -E bash deploy/install_ubuntu.sh`。
+
+> 运行中也可**免重启**切换：`echo "mode probe" | sudo tee forwarder_data/agent_cmd.txt`（`mode reload` 切回，`mode` 查看当前模式）。
+
 **可选环境变量**：
 
 | 变量 | 作用 |
 | --- | --- |
 | `APP_USER=douyin` | root 场景下指定服务用户 |
+| `DETECT_MODE` | 非交互式部署时预设检测模式（`reload` / `probe`） |
 | `PIP_INDEX_URL=https://pypi.org/simple` | 覆盖 pip 镜像源 |
 
 ---
@@ -405,7 +436,7 @@ sudo systemctl status douyin-forward       # 状态
 
 ## 10. 功能验收清单（更新后逐项确认生效）
 
-> 适用版本：commit `043a5cf` 及以后（登录编号菜单 / 截图链接 / 作品去重 / 对话式加账号 / 静音暂停 / 缓存清理 / 多会话）。
+> 适用版本：commit `043a5cf` 及以后（登录编号菜单 / 截图链接 / 作品去重 / 对话式加账号 / 静音暂停 / 缓存清理 / 多会话 / 检测模式 reload·probe）。
 > 更新命令：`sudo systemctl stop douyin-forward && cd /opt/douyin_download_bot && sudo -u douyin git pull && sudo systemctl start douyin-forward`
 
 **基础检查（1 分钟）**
@@ -428,11 +459,12 @@ journalctl -u douyin-forward -f                        # 实时日志
 | ⑤ | 视频静音暂停 | 有界面模式（VNC）观察提取链接时打开的浏览器 | 视频不会播放/出声音（无头模式无感知，属静默改进，无需操作） |
 | ⑥ | 缓存自动清理 | 配好 TG 推送后转发一个新视频；或等定时清理生效 | 日志 `🧹 推送成功，已删除本地缓存: <目录名>`；`ls output/` 不再堆积。未开推送则按 `FORWARDER_CACHE_TTL_HOURS`（默认 72h）清理 |
 | ⑦ | 多会话监测 | 已配置多个昵称时看启动/轮询日志；两个大号各转发一条视频 | 日志 `已锁定 2 个目标会话，仅处理这些会话内的转发: 小明（ID: …）；小红（ID: …）`，两条视频都被解析 |
+| ⑧ | 检测模式（reload / probe） | 启动日志看「检测模式」；运行中执行 `echo "mode" &#124; sudo tee forwarder_data/agent_cmd.txt` 查看，`echo "mode probe"` / `echo "mode reload"` 切换 | 启动日志出现 `检测模式: reload（每轮整页刷新）` 或 `probe（DOM 探针 + 定期强制取数 + 自愈刷新）`；切换后下一轮日志显示新模式，probe 模式空闲轮次为 `probe: 页面无变化，跳过本轮（0 请求）` |
 
 **一键抽查**（服务运行期间随时执行，看最近半小时是否各就位）：
 
 ```bash
-journalctl -u douyin-forward --since "30 min ago" | grep -E "已锁定|登录操作菜单|预览链接|检测到重复|已设置监测账号|已删除本地缓存"
+journalctl -u douyin-forward --since "30 min ago" | grep -E "已锁定|登录操作菜单|预览链接|检测到重复|已设置监测账号|已删除本地缓存|检测模式|probe:"
 ```
 
 任何一项对不上：把对应日志片段（`journalctl -u douyin-forward --since "10 min ago"`）发出来即可快速定位。
@@ -453,6 +485,8 @@ journalctl -u douyin-forward --since "30 min ago" | grep -E "已锁定|登录操
 | `reset` / `重置` | 清除自定义账号，恢复 `.env` 默认值 | 任意 |
 | `menu` / `菜单` / `help` | 重新输出菜单 / 使用说明（含当前监测账号列表） | 任意 |
 | `force` / `立即` | 不等轮询周期，立刻执行下一轮检查 | 任意 |
+| `mode` / `模式` | 查看当前检测模式、参数与说明 | 任意 |
+| `mode reload` / `mode probe` / `mode reset` | 切换检测模式（免重启，下一轮生效） | 任意 |
 | `刷新` / `refresh` | 重新截图并输出最新预览链接 | 登录期间 |
 
 写法示例（服务器上，用 `sudo tee` 规避权限问题）：
@@ -488,7 +522,12 @@ echo menu        | sudo tee /opt/douyin_download_bot/forwarder_data/agent_cmd.tx
 | `DOUYIN_CHAT_URL` | `https://www.douyin.com/chat?isPopup=1` | 私信页地址（抖音改版才需要改） |
 | `DOUYIN_HEADLESS` | `true` | 无头模式；首次登录/本机调试可设 `false` |
 | `DOUYIN_QR_TIMEOUT` | `300` | 扫码等待秒数（超时自动重开窗口滚动重试） |
-| `DOUYIN_POLL_INTERVAL` | `20` | 私信轮询间隔（秒） |
+| `DOUYIN_POLL_INTERVAL` | `20` | 私信轮询间隔（秒）；`reload` 模式使用 |
+| `DOUYIN_DETECT_MODE` | `reload` | 检测模式：`reload`（现状）/ `probe`（B 方案，省资源） |
+| `DOUYIN_PROBE_INTERVAL` | `10` | probe：DOM 探针间隔（秒） |
+| `DOUYIN_FORCE_FETCH_INTERVAL` | `45` | probe：强制取数间隔（秒） |
+| `DOUYIN_RELOAD_INTERVAL` | `7200` | probe：自愈整页刷新间隔（秒），`0` = 关闭 |
+| `DOUYIN_RELOAD_ON_FAILURES` | `3` | probe：连续取数失败多少次触发自愈刷新 |
 | `DOUYIN_ONLY_OTHERS` | `true` | 只处理对方（大号）发来的消息 |
 | `DOUYIN_PROCESS_HISTORY` | `false` | 首次运行是否处理历史转发 |
 

@@ -81,6 +81,19 @@ class ForwarderSettings:
     headless: bool = field(default_factory=lambda: _env_bool("DOUYIN_HEADLESS", True))
     qr_timeout: int = field(default_factory=lambda: _env_int("DOUYIN_QR_TIMEOUT", 300))
     poll_interval: int = field(default_factory=lambda: _env_int("DOUYIN_POLL_INTERVAL", 20))
+    # ─────────────── 检测模式（reload / probe） ───────────────
+    # reload：现状——每轮 page.reload 整页刷新（实时性最好、最稳；资源消耗高）
+    # probe ：B 方案——DOM 探针 + 定期强制取数 + 自愈刷新（资源消耗低；最坏延迟约一个取数周期）
+    # 运行中可免重启切换：控制台写 "mode probe" / "mode reload"（持久化到 state.json，优先于 .env）
+    detect_mode: str = field(default_factory=lambda: _env("DOUYIN_DETECT_MODE", "reload"))
+    # probe 模式：DOM 探针间隔（秒）——只读一次页面，不发网络请求
+    probe_interval: int = field(default_factory=lambda: _env_int("DOUYIN_PROBE_INTERVAL", 10))
+    # probe 模式：强制取数间隔（秒）——无论探针是否变化都点一次会话，防止推送静默失效导致漏消息
+    force_fetch_interval: int = field(default_factory=lambda: _env_int("DOUYIN_FORCE_FETCH_INTERVAL", 45))
+    # probe 模式：自愈刷新间隔（秒）——定期整页 reload 重置页面状态；0 = 关闭
+    reload_interval: int = field(default_factory=lambda: _env_int("DOUYIN_RELOAD_INTERVAL", 7200))
+    # probe 模式：连续取数失败多少次后触发自愈刷新
+    reload_on_failures: int = field(default_factory=lambda: _env_int("DOUYIN_RELOAD_ON_FAILURES", 3))
     max_clicks_per_poll: int = field(default_factory=lambda: _env_int("DOUYIN_MAX_CLICKS", 3))
     # 只处理"对方"（大号）发来的消息，忽略小号自己的消息
     only_others: bool = field(default_factory=lambda: _env_bool("DOUYIN_ONLY_OTHERS", True))
@@ -141,6 +154,11 @@ class ForwarderSettings:
         """监测昵称列表（拆分后的结果；为空表示未设置、自动选择会话）。"""
         return split_accounts(self.main_account)
 
+    def normalized_detect_mode(self) -> str:
+        """规范化检测模式：只认 reload / probe（兼容 b、探针等别名）。"""
+        raw = (self.detect_mode or "reload").strip().lower()
+        return "probe" if raw in ("probe", "b", "planb", "plan_b", "探针", "轻量") else "reload"
+
     def describe(self) -> str:
         accounts = self.main_accounts
         if not accounts:
@@ -155,6 +173,10 @@ class ForwarderSettings:
             f"  聊天页地址       : {self.chat_url}",
             f"  无头模式         : {self.headless}",
             f"  轮询间隔         : {self.poll_interval}s",
+            f"  检测模式(.env)   : {self.normalized_detect_mode()}"
+            + ("（DOM 探针 + 定期取数）" if self.normalized_detect_mode() == "probe" else "（每轮整页刷新）"),
+            f"  探针/取数/自愈   : {self.probe_interval}s / {self.force_fetch_interval}s / "
+            f"{self.reload_interval}s（连续失败 {self.reload_on_failures} 次自愈）",
             f"  解析最小间隔     : {self.parse_min_interval}s",
             f"  输出目录         : {self.output_dir}",
             f"  跳过媒体处理     : {self.skip_media_processing}",

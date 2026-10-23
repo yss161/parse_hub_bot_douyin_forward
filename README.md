@@ -57,7 +57,7 @@ douyin_download_bot/
 ├── parse_hub_bot/               # 原项目（git 子模块，未改动）
 ├── forwarder/                   # 新增：转发链路
 │   ├── config.py                #   配置（读 .env / 环境变量）
-│   ├── douyin_web.py            #   抖音网页接收端（登录+轮询+链接提取+远程控制台）
+│   ├── douyin_web.py            #   抖音网页接收端（登录+双检测模式+链接提取+远程控制台）
 │   ├── parser_bridge.py         #   桥接原项目解析流水线
 │   ├── archive.py               #   归档（复制媒体 + metadata.json）
 │   ├── state.py                 #   去重（消息/链接/视频ID）/水位/会话设置值
@@ -70,6 +70,9 @@ douyin_download_bot/
 ├── .env.example                 # 配置样例（复制为 .env）
 ├── deploy/                      # Ubuntu 部署（一键脚本 + systemd 模板）
 │   ├── install_ubuntu.sh        #   一键部署脚本
+│   ├── configure_accounts.sh    #   交互式配置：单会话 / 多会话
+│   ├── configure_detect_mode.sh #   交互式配置：检测模式 reload / probe
+│   ├── configure_parser_cookie.sh #  交互式配置：解析端 cookie 方式
 │   └── douyin-forward.service   #   systemd 服务模板
 ├── DEPLOY_UBUNTU.md             # Ubuntu 服务器部署指南
 ├── forwarder_data/              # 运行数据（浏览器登录态/状态/二维码，自动创建）
@@ -227,6 +230,7 @@ echo "-小红" > forwarder_data/agent_cmd.txt       # 移除 小红
 | `123456` | 登录流程中自动填入验证码；`123456 go` = 填入并回车提交 |
 | `menu` / `菜单` | 重新输出操作菜单 / 使用说明（含当前监测账号列表） |
 | `force` / `立即` | 不等轮询周期，立刻执行下一轮检查 |
+| `mode reload` / `mode probe` / `mode reset` | 切换**检测模式**（免重启，下一轮生效）；不带参数显示当前模式、参数与说明 |
 
 ### 登录操作菜单（回复数字即可点击）
 
@@ -270,6 +274,53 @@ echo "123456 go" > forwarder_data/agent_cmd.txt  # 填入并回车提交（一�
 - 安全说明：该服务**只暴露白名单文件**（登录二维码/页面截图/菜单），不含任何登录态文件；
   但仍建议限制访问来源，或登录完成后以 `FORWARDER_SHOT_PORT=0` 关闭。
 
+## 检测模式（reload / probe）
+
+两种模式**解析结果完全一致**（同一个消息接口、同一套去重与解析链路），差别只在「怎么发现新转发」：
+
+| | `reload`（现状，默认） | `probe`（B 方案） |
+| --- | --- | --- |
+| 检测方式 | 每轮 `page.reload` 整页刷新 + 点开监测会话 | DOM 探针（0 请求）+ 定期强制取数 + 自愈刷新 |
+| 请求量（实测） | 约 250 个/轮，20 秒间隔 ≈ 65–108 万/天 | 约 2–4 万/天（↓95%+） |
+| 单轮耗时 | 32–62 秒（整页重载） | 0.05 秒（无变化）/ 1–2 秒（取数） |
+| 检测延迟 | 20–60 秒 | 正常 ≤10 秒；推送失效时 ≤45 秒（兜底） |
+| 稳定性 | 最高：每轮全量重同步 | 高：靠定期取数 + 自愈 reload 兜底 |
+| 适用 | 服务器配置充足、要求最稳 | 长期挂机 / 低配服务器 / 想省资源 |
+
+### 怎么选
+
+- **默认 `reload`**：行为与旧版完全一致，升级后什么都不改也不会变；
+- **想省资源选 `probe`**：请求量降 95%+，正常消息反而更快（探针 10 秒一次），代价是「推送彻底失效」时最坏延迟约 45 秒；
+- 两种模式都保留**首次运行全量建水位**与**失败自愈**，不会因为省资源而漏掉启动前的历史。
+
+### 部署时选择
+
+```bash
+sudo bash deploy/configure_detect_mode.sh
+# 或非交互：
+DETECT_MODE=probe sudo -E bash deploy/install_ubuntu.sh
+```
+
+### 运行中免重启切换
+
+```bash
+echo "mode probe"  > forwarder_data/agent_cmd.txt   # 切到 B 方案（省资源）
+echo "mode reload" > forwarder_data/agent_cmd.txt   # 切回现状（每轮整页刷新）
+echo "mode"        > forwarder_data/agent_cmd.txt   # 查看当前模式、参数与说明
+echo "mode reset"  > forwarder_data/agent_cmd.txt   # 恢复 .env 默认
+```
+
+切换结果持久化到 `forwarder_data/state.json`，优先级高于 `.env`，**下一轮检测立即生效，无需重启服务**。
+
+### probe 模式参数（.env）
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `DOUYIN_PROBE_INTERVAL` | `10` | DOM 探针间隔（秒），只读页面、0 网络请求 |
+| `DOUYIN_FORCE_FETCH_INTERVAL` | `45` | 强制取数间隔（秒），兜住「推送静默失效」 |
+| `DOUYIN_RELOAD_INTERVAL` | `7200` | 自愈整页刷新间隔（秒），`0` = 关闭 |
+| `DOUYIN_RELOAD_ON_FAILURES` | `3` | 连续取数失败多少次触发自愈刷新 |
+
 ## 本地缓存清理
 
 | 变量 | 默认 | 说明 |
@@ -290,7 +341,8 @@ echo "123456 go" > forwarder_data/agent_cmd.txt  # 填入并回车提交（一�
 | --- | --- | --- |
 | `DOUYIN_MAIN_ACCOUNT` | 空 | **单会话**：只监测一个大号（昵称包含匹配）；**匹配到的会话会被严格锁定**——只解析这些会话内的新转发，其他会话/群聊的分享会被忽略 |
 | `DOUYIN_MAIN_ACCOUNTS` | 空 | **多会话**：同时监测多个用户/大号，昵称用逗号分隔（如 `小明,小红`）；设置后优先于 `DOUYIN_MAIN_ACCOUNT`。两者都留空则自动选「有未读角标/第一条」会话。**也可以不改这里**——运行中直接往控制台写昵称即可（见「远程控制台」） |
-| `DOUYIN_POLL_INTERVAL` | `20` | 私信轮询间隔（秒） |
+| `DOUYIN_POLL_INTERVAL` | `20` | 私信轮询间隔（秒）；`reload` 模式使用 |
+| `DOUYIN_DETECT_MODE` | `reload` | 检测模式：`reload`（现状，整页刷新）/ `probe`（B 方案，省资源）；运行中可用控制台 `mode` 免重启切换 |
 | `FORWARDER_PARSE_MIN_INTERVAL` | `8` | 两次解析之间的最小间隔（秒），防频繁请求 |
 | `FORWARDER_OUTPUT_DIR` | `./output` | 归档目录 |
 | `DOUYIN_PROCESS_HISTORY` | `false` | 首次运行是否处理历史转发 |

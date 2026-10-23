@@ -160,6 +160,12 @@ if ! bash "$SCRIPT_DIR/configure_parser_cookie.sh"; then
   warn "解析端 cookie 配置未完成 —— 可稍后运行: bash $PROJECT_DIR/deploy/configure_parser_cookie.sh"
 fi
 
+# 交互式选择检测模式：reload（现状，最稳）/ probe（B 方案，省资源）
+# （非交互式环境自动跳过；可用 DETECT_MODE=reload|probe 环境变量预设）
+if ! bash "$SCRIPT_DIR/configure_detect_mode.sh"; then
+  warn "检测模式配置未完成 —— 可稍后运行: bash $PROJECT_DIR/deploy/configure_detect_mode.sh"
+fi
+
 if [ "$(id -u)" -eq 0 ]; then
   chown -R "$RUN_AS:$RUN_AS" "$PROJECT_DIR"
 fi
@@ -210,6 +216,8 @@ cat <<EOF
    编辑配置     : $PROJECT_DIR/.env
    重配监测账号 : sudo bash $PROJECT_DIR/deploy/configure_accounts.sh   # 单会话 / 多会话交互选择
    重配解析Cookie: sudo bash $PROJECT_DIR/deploy/configure_parser_cookie.sh  # 不填/自动/手动/文件
+   重配检测模式 : sudo bash $PROJECT_DIR/deploy/configure_detect_mode.sh # reload（现状）/ probe（B 方案）
+   运行中切模式 : echo "mode probe" | sudo tee $PROJECT_DIR/forwarder_data/agent_cmd.txt   # 免重启
    运行中换账号 : echo "新昵称" | sudo tee $PROJECT_DIR/forwarder_data/agent_cmd.txt   # 免重启即时生效
    重启服务     : sudo systemctl restart $SERVICE_NAME
    更新浏览器   : sudo -u $RUN_AS -H $VENV_DIR/bin/playwright install chromium
