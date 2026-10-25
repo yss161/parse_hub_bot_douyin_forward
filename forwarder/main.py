@@ -136,7 +136,18 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
             f"（.env 为 {settings.normalized_detect_mode()}）；如需恢复 .env 默认，往 agent_cmd.txt 写 mode reset"
         )
     reporter = LogStatusReporter("Pipeline")
-    pusher = TgPusher(settings)
+    pusher = TgPusher(settings, state)
+    logger.info(
+        f"实况图模式: {pusher.effective_live_photo_mode}"
+        + ("（只发实况图）" if pusher.effective_live_photo_mode == "live"
+           else ("（实况图 + 视频）" if pusher.effective_live_photo_mode == "both" else "（只发视频）"))
+        + f"；限制 ≤{settings.live_photo_max_seconds}s / ≤{settings.live_photo_max_mb}MB"
+        + (
+            f"；实况图超过 {settings.live_photo_max_items} 张回退视频"
+            if settings.live_photo_max_items > 0
+            else "；实况图数量不限制"
+        )
+    )
 
     override = state.get_value("main_account")
     if override:

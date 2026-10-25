@@ -86,7 +86,7 @@ sudo APP_USER=douyin bash deploy/install_ubuntu.sh
 2. 检测 Python ≥ 3.12（不足则自动装 `python3.12`）；
 3. 创建虚拟环境 `.venv`，安装 `requirements-forwarder.txt`（默认**腾讯云 PyPI 镜像**，失败自动回退官方源）；
 4. 安装 Playwright Chromium 浏览器；
-5. 生成 `.env`（若不存在），并**交互式询问监测账号**（单会话 / 多会话）、**解析端 Cookie 方式**、**检测模式**（reload / probe），按选择写入 .env；
+5. 生成 `.env`（若不存在），并**交互式询问监测账号**（单会话 / 多会话）、**解析端 Cookie 方式**、**检测模式**（reload / probe）、**实况图模式**（video / live / both），按选择写入 .env；
 6. 安装 systemd 服务 `douyin-forward`（**安装但不启动**）；
 7. 打印「首次登录 + 启动服务」的后续步骤。
 
@@ -179,12 +179,47 @@ PARSER_COOKIE_MODE=auto sudo -E bash deploy/install_ubuntu.sh
 
 > 运行中也可**免重启**切换：`echo "mode probe" | sudo tee forwarder_data/agent_cmd.txt`（`mode reload` 切回，`mode` 查看当前模式）。
 
+### 第四个交互：实况图（Live Photo）
+
+最后会问「实况图怎么发」（**只对实况图作品生效**，普通视频/图集不受影响）：
+
+```
+──────────────────────────────────────────────
+ 实况图（Live Photo）怎么发？
+   当前配置: video
+
+   1) video（现状，默认）
+      ✅ 只发视频，最稳、聊天最干净（实况图会变成普通视频）
+      ❌ 丢失实况图的静态图/实况效果
+
+   2) live（只发实况图）
+      ✅ 聊天里显示为实况图（静态图 + 动态）
+      ❌ 旧客户端只显示静态图；没有视频备份；多图会逐条发送
+      ℹ 视频超过 Telegram 限制（10 秒 / 10MB）时自动改发视频
+
+   3) both（实况图 + 视频）
+      ✅ 实况图和视频都保留，兼容性最好
+      ❌ 每条实况图会多发一条视频；流量/存储约翻倍
+      ℹ 超限的只发视频；实况图超过 3 张时整帖回退视频，避免刷屏
+
+   4) 保持不变（回车默认）
+──────────────────────────────────────────────
+```
+
+- **选 1（默认）**：与旧版行为完全一致；
+- **选 2/3**：适合想保留 Live Photo 效果的场景；
+- 已部署后随时重配：`sudo bash /opt/douyin_download_bot/deploy/configure_live_photo.sh`；
+- 非交互部署：`LIVE_PHOTO_MODE=both sudo -E bash deploy/install_ubuntu.sh`。
+
+> 运行中也可**免重启**切换：`echo "live both" | sudo tee forwarder_data/agent_cmd.txt`（`live video` 切回，`live` 查看当前模式）。
+
 **可选环境变量**：
 
 | 变量 | 作用 |
 | --- | --- |
 | `APP_USER=douyin` | root 场景下指定服务用户 |
 | `DETECT_MODE` | 非交互式部署时预设检测模式（`reload` / `probe`） |
+| `LIVE_PHOTO_MODE` | 非交互式部署时预设实况图模式（`video` / `live` / `both`） |
 | `PIP_INDEX_URL=https://pypi.org/simple` | 覆盖 pip 镜像源 |
 
 ---
@@ -460,11 +495,12 @@ journalctl -u douyin-forward -f                        # 实时日志
 | ⑥ | 缓存自动清理 | 配好 TG 推送后转发一个新视频；或等定时清理生效 | 日志 `🧹 推送成功，已删除本地缓存: <目录名>`；`ls output/` 不再堆积。未开推送则按 `FORWARDER_CACHE_TTL_HOURS`（默认 72h）清理 |
 | ⑦ | 多会话监测 | 已配置多个昵称时看启动/轮询日志；两个大号各转发一条视频 | 日志 `已锁定 2 个目标会话，仅处理这些会话内的转发: 小明（ID: …）；小红（ID: …）`，两条视频都被解析 |
 | ⑧ | 检测模式（reload / probe） | 启动日志看「检测模式」；运行中执行 `echo "mode" &#124; sudo tee forwarder_data/agent_cmd.txt` 查看，`echo "mode probe"` / `echo "mode reload"` 切换 | 启动日志出现 `检测模式: reload（每轮整页刷新）` 或 `probe（DOM 探针 + 定期强制取数 + 自愈刷新）`；切换后下一轮日志显示新模式，probe 模式空闲轮次为 `probe: 页面无变化，跳过本轮（0 请求）` |
+| ⑨ | 实况图（Live Photo） | 用大号转发一个实况图作品；启动日志看「实况图模式」；或 `echo "live" &#124; sudo tee forwarder_data/agent_cmd.txt` | `video` 模式日志 `开始推送至 Telegram（媒体数: N）` 且收到视频；`live` 模式日志 `实况图推送: N 张` 且收到 Live Photo；超限时日志 `超过 10MB` / `时长 … 超过 10s，改发视频` |
 
 **一键抽查**（服务运行期间随时执行，看最近半小时是否各就位）：
 
 ```bash
-journalctl -u douyin-forward --since "30 min ago" | grep -E "已锁定|登录操作菜单|预览链接|检测到重复|已设置监测账号|已删除本地缓存|检测模式|probe:"
+journalctl -u douyin-forward --since "30 min ago" | grep -E "已锁定|登录操作菜单|预览链接|检测到重复|已设置监测账号|已删除本地缓存|检测模式|probe:|实况图"
 ```
 
 任何一项对不上：把对应日志片段（`journalctl -u douyin-forward --since "10 min ago"`）发出来即可快速定位。
@@ -487,6 +523,8 @@ journalctl -u douyin-forward --since "30 min ago" | grep -E "已锁定|登录操
 | `force` / `立即` | 不等轮询周期，立刻执行下一轮检查 | 任意 |
 | `mode` / `模式` | 查看当前检测模式、参数与说明 | 任意 |
 | `mode reload` / `mode probe` / `mode reset` | 切换检测模式（免重启，下一轮生效） | 任意 |
+| `live` / `实况` | 查看当前实况图模式与限制 | 任意 |
+| `live video` / `live live` / `live both` / `live reset` | 切换实况图模式（免重启，下一轮生效） | 任意 |
 | `刷新` / `refresh` | 重新截图并输出最新预览链接 | 登录期间 |
 
 写法示例（服务器上，用 `sudo tee` 规避权限问题）：
@@ -528,6 +566,10 @@ echo menu        | sudo tee /opt/douyin_download_bot/forwarder_data/agent_cmd.tx
 | `DOUYIN_FORCE_FETCH_INTERVAL` | `45` | probe：强制取数间隔（秒） |
 | `DOUYIN_RELOAD_INTERVAL` | `7200` | probe：自愈整页刷新间隔（秒），`0` = 关闭 |
 | `DOUYIN_RELOAD_ON_FAILURES` | `3` | probe：连续取数失败多少次触发自愈刷新 |
+| `FORWARDER_LIVE_PHOTO_MODE` | `video` | 实况图模式：`video` / `live` / `both` |
+| `FORWARDER_LIVE_PHOTO_MAX_SECONDS` | `10` | 实况视频最大秒数，超过改发视频 |
+| `FORWARDER_LIVE_PHOTO_MAX_MB` | `10` | 实况视频最大 MB，超过改发视频 |
+| `FORWARDER_LIVE_PHOTO_MAX_ITEMS` | `3` | 实况图数量超过该值整帖回退视频；`0` = 不限 |
 | `DOUYIN_ONLY_OTHERS` | `true` | 只处理对方（大号）发来的消息 |
 | `DOUYIN_PROCESS_HISTORY` | `false` | 首次运行是否处理历史转发 |
 

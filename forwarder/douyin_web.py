@@ -849,7 +849,15 @@ class DouyinWebReceiver:
         if m:
             return self._handle_mode_command((m.group(1) or "").strip())
 
-        # 4) 编号选项（登录菜单）：回复数字即点击对应按钮
+        # 4) 实况图模式（video / live / both）：免重启切换
+        m = re.fullmatch(
+            r"(?:live|livephoto|live_photo|实况|实况图)\s*(video|live|both|1|2|3|视频|实况|两者|reset|重置)?",
+            low,
+        )
+        if m:
+            return self._handle_live_photo_command((m.group(1) or "").strip())
+
+        # 5) 编号选项（登录菜单）：回复数字即点击对应按钮
         if re.fullmatch(r"\d{1,2}", low):
             n = int(low)
             if self._login_options:
@@ -860,7 +868,7 @@ class DouyinWebReceiver:
             self._log_console_help()
             return True
 
-        # 5) 纯数字验证码：自动填入（可选 go 回车提交）
+        # 6) 纯数字验证码：自动填入（可选 go 回车提交）
         m = re.fullmatch(r"(\d{4,8})(?:\s+(go|enter|回车|提交))?", low)
         if m:
             if page is None:
@@ -874,32 +882,32 @@ class DouyinWebReceiver:
                 logger.info("已回车提交验证码")
             return True
 
-        # 6) 刷新页面截图
+        # 7) 刷新页面截图
         if low in ("刷新", "refresh"):
             await self._capture_qr(self.settings.qr_image_path)
             await self._snapshot_login_page()
             logger.info(f"已刷新页面截图: {self._shot_link('login_page_state.png')}")
             return True
 
-        # 7) 立即执行下一轮
+        # 8) 立即执行下一轮
         if low in ("force", "now", "立即", "现在"):
             self._force_poll = True
             logger.info("已记录：本轮结束后立即执行下一轮检查")
             return True
 
-        # 8) 兼容旧版自由指令
+        # 9) 兼容旧版自由指令
         legacy = await self._run_legacy_command(line)
         if legacy is not None:
             return legacy
 
-        # 9) 页面上的编号选项若能被文本直接命中，也允许按文本点击（免记编号）
+        # 10) 页面上的编号选项若能被文本直接命中，也允许按文本点击（免记编号）
         if self._login_options and page is not None:
             for label, _note in self._login_options:
                 if label != _REFRESH_OPTION and label and label in line:
                     await self._click_login_option(label)
                     return True
 
-        # 10) 其它纯文本 = 设置"监测账号"（支持多个；对话式添加，免指令、免重启）
+        # 11) 其它纯文本 = 设置"监测账号"（支持多个；对话式添加，免指令、免重启）
         raw = line.strip()
         if not raw or len(raw) > 200:
             raise RuntimeError("无法识别的输入（长度需 1~200 字符）")
@@ -975,6 +983,50 @@ class DouyinWebReceiver:
             "  切换（免重启，下一轮生效）: mode reload | mode probe | mode reset",
             f"  当前参数: 探针 {self.settings.probe_interval}s / 强制取数 {self.settings.force_fetch_interval}s"
             f" / 自愈 {self.settings.reload_interval}s（连续失败 {self.settings.reload_on_failures} 次）",
+        ]
+        logger.info("\n" + "\n".join(lines))
+
+    def _handle_live_photo_command(self, arg: str) -> bool:
+        """实况图模式查看/切换（video=只发视频，live=只发实况图，both=两者）。"""
+        arg = (arg or "").strip().lower()
+        if arg in ("", "status", "状态"):
+            self._log_live_photo_help()
+            return True
+        if arg in ("reset", "重置", "default", "默认"):
+            self.state.clear_value("live_photo_mode")
+            self.state.save()
+            logger.success(
+                f"实况图模式已恢复 .env 默认: {self.settings.normalized_live_photo_mode()}（下一轮生效）"
+            )
+            self._log_live_photo_help()
+            return True
+        mapping = {
+            "video": "video", "1": "video", "视频": "video",
+            "live": "live", "2": "live", "实况": "live", "实况图": "live",
+            "both": "both", "3": "both", "两者": "both", "都要": "both",
+        }
+        mode = mapping.get(arg)
+        if not mode:
+            raise RuntimeError("用法: live video | live live | live both | live reset")
+        self.state.set_value("live_photo_mode", mode)
+        self.state.save()
+        logger.success(f"实况图模式已切换为 {mode}（下一轮生效）")
+        self._log_live_photo_help()
+        return True
+
+    def _log_live_photo_help(self) -> None:
+        """输出实况图模式说明（含当前限制）。"""
+        raw = self.state.get_value("live_photo_mode")
+        mode = raw or self.settings.normalized_live_photo_mode()
+        source = "控制台设置" if raw else ".env 默认"
+        lines = [
+            f"【实况图模式】当前: {mode}（来源: {source}）",
+            "  video：只发视频（现状，最稳）",
+            "  live ：只发实况图；视频超过 Telegram 限制时自动改发视频",
+            "  both ：实况图 + 视频；超限的只发视频",
+            "  切换（免重启，下一轮生效）: live video | live live | live both | live reset",
+            f"  当前限制: ≤{self.settings.live_photo_max_seconds}s / ≤{self.settings.live_photo_max_mb}MB"
+            f"；实况图超过 {self.settings.live_photo_max_items} 张时整帖回退视频（0=不限）",
         ]
         logger.info("\n" + "\n".join(lines))
 
@@ -1160,6 +1212,7 @@ class DouyinWebReceiver:
             "  reset / 重置        → 清除自定义账号，恢复 .env 默认值",
             "  force / now / 立即  → 不等待轮询周期，立刻执行下一轮检查",
             "  mode / 模式         → 查看/切换检测模式（mode reload | mode probe | mode reset，免重启）",
+            "  live / 实况         → 查看/切换实况图模式（live video | live live | live both | live reset）",
             "  菜单 / help         → 重新显示本说明",
             "  纯数字验证码(4~8位)  → 登录流程中填入验证码输入框；`123456 go` = 填入并回车",
             "  登录/验证页会自动给出编号菜单：把数字写入指令文件即可点击对应按钮",

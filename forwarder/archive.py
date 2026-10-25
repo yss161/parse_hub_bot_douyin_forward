@@ -76,6 +76,12 @@ def _collect_media_files(result: Any) -> list[Path]:
             src = _defensive_get(getattr(item, "source", None), "path")
             if src:
                 candidates.append(Path(src))
+        # LivePhotoFile：把实况视频也一并归档（否则本地只剩静态图，视频只在临时目录里）
+        video_path = getattr(getattr(item, "source", None), "video_path", None)
+        if video_path:
+            vp = Path(video_path)
+            if vp.is_file():
+                candidates.append(vp)
         for c in candidates:
             if c.is_file():
                 files.append(c)
@@ -96,9 +102,11 @@ def build_metadata(
 
     media_obj = _defensive_get(parse_result, "media", default=[])
     if isinstance(media_obj, (list, tuple)):
-        media_count = len(media_obj)
+        media_items = list(media_obj)
     else:
-        media_count = 1 if media_obj else 0
+        media_items = [media_obj] if media_obj else []
+    media_count = len(media_items)
+    live_photo_count = sum(1 for m in media_items if getattr(m, "video_url", None))
 
     return {
         "platform": "douyin",
@@ -108,6 +116,7 @@ def build_metadata(
         "author": _stringify_author(parse_result),
         "content": str(_defensive_get(parse_result, "content", default="") or ""),
         "media_count": media_count,
+        "live_photo_count": live_photo_count,
         "source_url": source_url,   # 私信里提取到的链接（可能是短链）
         "raw_url": raw_url,         # 原项目 get_raw_url 展开后的原始链接
         "video_key": video_key_from_url(raw_url) or video_key_from_url(source_url),
