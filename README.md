@@ -26,11 +26,27 @@
 
 你在手机上看到想保存的视频，直接「转发」给服务器上登录的小号即可，服务器自动完成解析与下载。
 
+<a id="docs-site"></a>
+
+## 文档站点
+
+在线文档（GitHub Pages）：**https://yss161.github.io/parse_hub_bot_douyin_forward/**
+
+本地预览：
+
+```bash
+cd docs
+pnpm install
+pnpm docs:dev
+```
+
+文档源码在 [docs/](docs/)，基于 [VitePress](https://vitepress.dev/) 构建；推送 `docs/` 变更会自动通过 GitHub Actions 部署。
+
 ---
 
 ## 目录
 
-- [功能特性](#features) · [工作流程](#flow) · [与原项目的关系](#relation) · [目录结构](#layout)
+- [文档站点](#docs-site) · [功能特性](#features) · [工作流程](#flow) · [与原项目的关系](#relation) · [目录结构](#layout)
 - [环境要求](#requirements) · [快速开始](#quickstart) · [运行模式](#run-modes) · [远程控制台](#console)
 - [检测模式](#detect-mode) · [实况图](#live-photo) · [归档与元数据](#archive) · [去重与状态](#dedupe)
 - [本地缓存清理](#cache) · [配置说明](#config) · [推送到 Telegram](#tg-push) · [部署到 Ubuntu](#deploy)
@@ -147,6 +163,8 @@ douyin_download_bot/
 │   ├── configure_live_photo.sh  #   交互式配置：实况图 video / live / both
 │   ├── configure_parser_cookie.sh #  交互式配置：解析端 cookie 方式
 │   └── douyin-forward.service   #   systemd 服务模板
+├── docs/                        # 文档站点（VitePress，GitHub Pages）
+├── .github/workflows/           # GitHub Actions（文档自动部署）
 ├── DEPLOY_UBUNTU.md             # Ubuntu 服务器部署指南
 ├── forwarder_data/              # 运行数据（浏览器登录态/状态/二维码，自动创建）
 └── output/                      # 解析结果归档（自动创建）

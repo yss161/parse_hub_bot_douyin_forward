@@ -17,3 +17,9 @@ __pycache__/
 
 # Playwright
 .playwright/
+
+# 文档站点（VitePress）
+docs/node_modules/
+docs/.vitepress/dist/
+docs/.vitepress/cache/
+docs/.vitepress/.temp/
