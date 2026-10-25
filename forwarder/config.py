@@ -112,7 +112,7 @@ class ForwarderSettings:
         default_factory=lambda: _env_int("FORWARDER_LIVE_PHOTO_MAX_SECONDS", 10)
     )
     live_photo_max_mb: int = field(default_factory=lambda: _env_int("FORWARDER_LIVE_PHOTO_MAX_MB", 10))
-    # 实况图数量超过该值时整帖回退为视频（避免逐条发送刷屏）；0 = 不限制
+    # 实况图数量超过该值时实况图回退为视频（避免逐条发送刷屏）；0 = 不限制
     live_photo_max_items: int = field(default_factory=lambda: _env_int("FORWARDER_LIVE_PHOTO_MAX_ITEMS", 3))
     max_clicks_per_poll: int = field(default_factory=lambda: _env_int("DOUYIN_MAX_CLICKS", 3))
     # 只处理"对方"（大号）发来的消息，忽略小号自己的消息

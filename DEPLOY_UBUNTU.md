@@ -200,7 +200,7 @@ PARSER_COOKIE_MODE=auto sudo -E bash deploy/install_ubuntu.sh
    3) both（实况图 + 视频）
       ✅ 实况图和视频都保留，兼容性最好
       ❌ 每条实况图会多发一条视频；流量/存储约翻倍
-      ℹ 超限的只发视频；实况图超过 3 张时整帖回退视频，避免刷屏
+      ℹ 超限的只发视频；实况图超过 3 张时实况图回退视频，避免刷屏
 
    4) 保持不变（回车默认）
 ──────────────────────────────────────────────
@@ -569,7 +569,7 @@ echo menu        | sudo tee /opt/douyin_download_bot/forwarder_data/agent_cmd.tx
 | `FORWARDER_LIVE_PHOTO_MODE` | `video` | 实况图模式：`video` / `live` / `both` |
 | `FORWARDER_LIVE_PHOTO_MAX_SECONDS` | `10` | 实况视频最大秒数，超过改发视频 |
 | `FORWARDER_LIVE_PHOTO_MAX_MB` | `10` | 实况视频最大 MB，超过改发视频 |
-| `FORWARDER_LIVE_PHOTO_MAX_ITEMS` | `3` | 实况图数量超过该值整帖回退视频；`0` = 不限 |
+| `FORWARDER_LIVE_PHOTO_MAX_ITEMS` | `3` | 实况图数量超过该值实况图回退视频；`0` = 不限 |
 | `DOUYIN_ONLY_OTHERS` | `true` | 只处理对方（大号）发来的消息 |
 | `DOUYIN_PROCESS_HISTORY` | `false` | 首次运行是否处理历史转发 |
 
