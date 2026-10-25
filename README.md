@@ -32,6 +32,9 @@
 
 在线文档（GitHub Pages）：**https://yss161.github.io/parse_hub_bot_douyin_forward/**
 
+> 注：账号的 `yss161.github.io` 已绑定自定义域名 `blog.mojian.fan`，因此 github.io 链接会跳转到
+> `https://blog.mojian.fan/parse_hub_bot_douyin_forward/`；两者内容一致。
+
 本地预览：
 
 ```bash
