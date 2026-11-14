@@ -265,6 +265,11 @@ class StateStore:
     def clear_gave_up(self, fp: str) -> None:
         self._data.get("gave_up", {}).pop(fp, None)
 
+    def gave_up_items(self) -> dict[str, dict]:
+        """返回所有已放弃记录的快照（用于升级时导入 SQLite 失败收件箱）。"""
+        bucket = self._data.get("gave_up", {})
+        return {str(k): dict(v) for k, v in bucket.items() if isinstance(v, dict)}
+
     # ────────────────────────── flags ──────────────────────────
 
     def get_flag(self, name: str) -> bool:

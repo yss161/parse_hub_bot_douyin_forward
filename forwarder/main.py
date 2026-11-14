@@ -125,6 +125,12 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
 
     state = StateStore(settings.state_file)
     store = Store(settings.db_file)
+    try:
+        migrated = store.migrate_legacy_gave_up(state)
+        if migrated:
+            logger.info(f"已导入 {migrated} 条历史放弃记录到失败收件箱（旧 state.json → SQLite）")
+    except Exception as e:
+        logger.warning(f"导入历史失败记录失败（不影响启动）: {e}")
     runtime = RuntimeStats()
     receiver = DouyinWebReceiver(settings, state)
     logger.info(

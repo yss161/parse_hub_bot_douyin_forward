@@ -132,7 +132,7 @@ Linux 下资源数据来自 `/proc`；Windows 本地调试时部分字段会显�
 - **忽略**：标记为已忽略，不再出现在未结列表；
 - **详情**：弹出完整错误文本。
 
-失败记录同时写入 `forwarder_data/forwarder.db` 的 `failures` 表，可用 `/failures` 和 `/retry` 管理。解析成功后会标记为已解决（`resolved`）。
+失败记录同时写入 `forwarder_data/forwarder.db` 的 `failures` 表，可用 `/failures` 和 `/retry` 管理。解析成功后会标记为已解决（`resolved`）。从旧版本升级时，首次启动会把 `state.json` 里的 `gave_up` 记录导入失败收件箱；旧版 `failures` 桶没有保存链接，无法重试，因此不导入。
 
 ### 失败分类与重试策略
 

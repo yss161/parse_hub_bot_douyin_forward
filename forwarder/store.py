@@ -17,6 +17,7 @@ import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from typing import Any
 
 
 def _day(value: str | None = None) -> str:
@@ -296,6 +297,40 @@ class Store:
                 (start,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def migrate_legacy_gave_up(self, state: Any) -> int:
+        """把旧版 state.json 的 gave_up 记录导入失败收件箱（按 fp 去重）。
+
+        旧版 failures 桶没有 URL，无法重试，因此不导入；gave_up 桶有 URL，
+        升级后可以直接在 /failures 里看到并用 /retry 重试。
+        """
+        from .failures import classify_failure
+
+        getter = getattr(state, "gave_up_items", None)
+        if not callable(getter):
+            return 0
+        existing = {str(row.get("fp") or "") for row in self.list_failures(limit=100000)}
+        added = 0
+        for fp, item in getter().items():
+            if not fp or fp in existing:
+                continue
+            url = str(item.get("url") or "").strip()
+            if not url:
+                continue
+            reason = str(item.get("reason") or "历史失败记录").strip() or "历史失败记录"
+            category = str(item.get("category") or "").strip() or classify_failure(reason).code
+            rec = self.record_failure(
+                fp=fp,
+                url=url,
+                error=reason,
+                category=category,
+                attempts=1,
+            )
+            if rec:
+                self.set_failure_status(int(rec["id"]), "gave_up")
+                existing.add(fp)
+                added += 1
+        return added
 
     def open_failure_count(self) -> int:
         with self._lock:
