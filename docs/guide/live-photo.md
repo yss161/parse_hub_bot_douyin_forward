@@ -14,7 +14,7 @@ outline: deep
 2. parsehub 把它解析为 `LivePhotoRef`（`url` = 静态图，`video_url` = 实况视频）。
 3. 下载后得到 `LivePhotoFile`：`path` = jpg，`video_path` = mp4。
 4. **旧行为**：原项目 `build_input_media` 把 `LivePhotoFile` 映射成 `InputMediaVideo(media=video_path)`，所以 Telegram 只收到视频——这就是「实况图解析出来直接是视频」的原因；解析层其实已经拿到了图片和视频。
-5. 本服务在 `forwarder/tg_push.py` 接管这个分支：按模式发送 `send_live_photo(photo, live_photo)`，或在超限时回退视频。
+5. 本服务在 `forwarder/tg_push.py` 接管这个分支：按模式调用 `forwarder/live_photo.py` 直接走 MTProto 发送（修正 kurigram 2.2.26 的 cover 引用错误），或在超限时回退视频。
 
 > 兼容性说明：目前实测抖音实况图走 `images[].video`；如果未来抖音切到 `image_post_info.images[].video`，parsehub 2.3.5/2.3.14 会丢掉视频（只保留 `display_image`），需要再补一层适配。当前版本不受影响。
 
@@ -29,7 +29,7 @@ outline: deep
 ## 超限与回退规则
 
 - Telegram 硬限制：`live_photo` 视频 **≤10 秒、≤10MB**；超限**不转码**，直接按普通视频发送（避免服务器依赖 ffmpeg）。
-- 实况图数量超过 `FORWARDER_LIVE_PHOTO_MAX_ITEMS`（默认 3）→ 实况图回退为视频，避免 14 张图变成 14 条消息刷屏；设为 `0` 可关闭限制。
+- 实况图数量超过 `FORWARDER_LIVE_PHOTO_MAX_ITEMS`（默认 10）→ 实况图回退为视频，避免 14 张图变成 14 条消息刷屏；设为 `0` 可关闭限制。
 - 缺静态图/视频、读取视频时长失败、`send_live_photo` 调用失败 → 该条自动改发视频。
 - 所有回退都会在日志中说明原因（`超过 10MB` / `时长 … 超过 10s` / `实况图 … 张 > 上限 …`）。
 
@@ -40,7 +40,7 @@ outline: deep
 | `FORWARDER_LIVE_PHOTO_MODE` | `video` | `video` / `live` / `both` |
 | `FORWARDER_LIVE_PHOTO_MAX_SECONDS` | `10` | 实况视频最大秒数，超过改发视频 |
 | `FORWARDER_LIVE_PHOTO_MAX_MB` | `10` | 实况视频最大 MB，超过改发视频 |
-| `FORWARDER_LIVE_PHOTO_MAX_ITEMS` | `3` | 实况图数量超过该值回退视频；`0` = 不限 |
+| `FORWARDER_LIVE_PHOTO_MAX_ITEMS` | `10` | 实况图数量超过该值回退视频；`0` = 不限 |
 
 ## 部署时选择
 
@@ -78,7 +78,7 @@ output/20261025_112210_7408859975616957696/
 
 ```text
 # 启动日志
-实况图模式: both（实况图 + 视频）；限制 ≤10s / ≤10MB；实况图超过 3 张回退视频
+实况图模式: both（实况图 + 视频）；限制 ≤10s / ≤10MB；实况图超过 10 张回退视频
 
 # 推送日志
 实况图推送: 2 张（模式: both，限制 ≤10s / ≤10MB）
@@ -86,7 +86,7 @@ output/20261025_112210_7408859975616957696/
 ```
 
 - 单张实况图作品：`live` 模式应收到一条可播放的 Live Photo；
-- 14 张实况图作品：默认 `MAX_ITEMS=3`，应回退为视频相册；
+- 14 张实况图作品：默认 `MAX_ITEMS=10`，应回退为视频相册；
 - 超 10 秒的视频：日志出现 `时长 … 超过 10s，改发视频`。
 
 ## 限制与已知问题

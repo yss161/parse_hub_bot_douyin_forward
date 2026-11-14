@@ -16,7 +16,7 @@
 #   2) live ：只发实况图；视频超过 Telegram 限制（10 秒 / 10MB）时自动改发视频
 #   3) both ：实况图 + 视频；超限的只发视频
 #   只对解析结果为实况图的作品生效；普通视频/图集不受影响。
-#   实况图数量超过 FORWARDER_LIVE_PHOTO_MAX_ITEMS（默认 3）时整帖回退视频，避免刷屏。
+#   实况图数量超过 FORWARDER_LIVE_PHOTO_MAX_ITEMS（默认 10）时整帖回退视频，避免刷屏。
 #
 # 运行中也可免重启切换：往 forwarder_data/agent_cmd.txt 写 "live live" / "live both" / "live video"
 # ============================================================
@@ -98,7 +98,7 @@ if [ -z "$mode" ]; then
   echo "   3) both（实况图 + 视频）"
   echo "      ✅ 实况图和视频都保留，兼容性最好"
   echo "      ❌ 每条实况图会多发一条视频；流量/存储约翻倍"
-  echo "      ℹ 超限的只发视频；实况图超过 3 张时整帖回退视频，避免刷屏"
+  echo "      ℹ 超限的只发视频；实况图超过 10 张时整帖回退视频，避免刷屏"
   echo
   echo "   4) 保持不变（回车默认）"
   echo "──────────────────────────────────────────────"
@@ -128,7 +128,7 @@ fi
 write_env_value "FORWARDER_LIVE_PHOTO_MODE" "$mode"
 [ -n "$(read_env_value FORWARDER_LIVE_PHOTO_MAX_SECONDS)" ] || write_env_value "FORWARDER_LIVE_PHOTO_MAX_SECONDS" "10"
 [ -n "$(read_env_value FORWARDER_LIVE_PHOTO_MAX_MB)" ] || write_env_value "FORWARDER_LIVE_PHOTO_MAX_MB" "10"
-[ -n "$(read_env_value FORWARDER_LIVE_PHOTO_MAX_ITEMS)" ] || write_env_value "FORWARDER_LIVE_PHOTO_MAX_ITEMS" "3"
+[ -n "$(read_env_value FORWARDER_LIVE_PHOTO_MAX_ITEMS)" ] || write_env_value "FORWARDER_LIVE_PHOTO_MAX_ITEMS" "10"
 
 case "$mode" in
   live) log "已写入实况图模式: FORWARDER_LIVE_PHOTO_MODE=live（只发实况图，超限自动改视频）" ;;

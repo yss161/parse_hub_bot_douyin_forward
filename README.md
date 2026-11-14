@@ -507,7 +507,7 @@ probe: 页面无变化，跳过本轮（0 请求）
 ### 超限与回退规则
 
 - Telegram 硬限制：`live_photo` 视频 **≤10 秒、≤10MB**；超限**不转码**，直接按普通视频发送（避免服务器依赖 ffmpeg）。
-- 实况图数量超过 `FORWARDER_LIVE_PHOTO_MAX_ITEMS`（默认 3）→ 实况图回退为视频（普通图片仍按图集），避免 14 张图变成 14 条消息刷屏；设为 `0` 可关闭该限制。
+- 实况图数量超过 `FORWARDER_LIVE_PHOTO_MAX_ITEMS`（默认 10）→ 实况图回退为视频（普通图片仍按图集），避免 14 张图变成 14 条消息刷屏；设为 `0` 可关闭该限制。
 - 缺静态图/视频、读取视频时长失败、`send_live_photo` 调用失败 → 该条自动改发视频，不影响其他媒体。
 - 所有回退都会在日志中说明原因（`超过 10MB` / `时长 … 超过 10s` / `实况图 … 张 > 上限 …`）。
 
@@ -536,13 +536,13 @@ echo "live reset" > forwarder_data/agent_cmd.txt   # 恢复 .env 默认
 | `FORWARDER_LIVE_PHOTO_MODE` | `video` | `video` / `live` / `both` |
 | `FORWARDER_LIVE_PHOTO_MAX_SECONDS` | `10` | 实况视频最大秒数，超过改发视频 |
 | `FORWARDER_LIVE_PHOTO_MAX_MB` | `10` | 实况视频最大 MB，超过改发视频 |
-| `FORWARDER_LIVE_PHOTO_MAX_ITEMS` | `3` | 实况图数量超过该值时实况图回退视频；`0` = 不限 |
+| `FORWARDER_LIVE_PHOTO_MAX_ITEMS` | `10` | 实况图数量超过该值时实况图回退视频；`0` = 不限 |
 
 ### 验证方法
 
 ```text
 # 启动日志
-实况图模式: both（实况图 + 视频）；限制 ≤10s / ≤10MB；实况图超过 3 张回退视频
+实况图模式: both（实况图 + 视频）；限制 ≤10s / ≤10MB；实况图超过 10 张回退视频
 
 # 推送日志
 实况图推送: 2 张（模式: both，限制 ≤10s / ≤10MB）
@@ -550,7 +550,7 @@ echo "live reset" > forwarder_data/agent_cmd.txt   # 恢复 .env 默认
 ```
 
 - 单张实况图作品：`live` 模式应收到一条可播放的 Live Photo；
-- 14 张实况图作品：默认 `MAX_ITEMS=3`，应回退为视频相册；
+- 14 张实况图作品：默认 `MAX_ITEMS=10`，应回退为视频相册；
 - 超 10 秒的视频：日志出现 `时长 … 超过 10s，改发视频`。
 
 ### 限制与已知问题
@@ -687,7 +687,7 @@ rm -rf forwarder_data/browser_profile
 | `DOUYIN_POLL_INTERVAL` | `20` | 私信轮询间隔（秒）；`reload` 模式使用 |
 | `DOUYIN_DETECT_MODE` | `reload` | 检测模式：`reload`（现状，整页刷新）/ `probe`（B 方案，省资源）；运行中可用控制台 `mode` 免重启切换 |
 | `FORWARDER_LIVE_PHOTO_MODE` | `video` | 实况图模式：`video`（只发视频）/ `live`（只发实况图）/ `both`（两者都发）；超限自动改发视频 |
-| `FORWARDER_LIVE_PHOTO_MAX_ITEMS` | `3` | 实况图数量超过该值时实况图回退视频（防刷屏）；`0` = 不限 |
+| `FORWARDER_LIVE_PHOTO_MAX_ITEMS` | `10` | 实况图数量超过该值时实况图回退视频（防刷屏）；`0` = 不限 |
 | `FORWARDER_PARSE_MIN_INTERVAL` | `8` | 两次解析之间的最小间隔（秒），防频繁请求 |
 | `FORWARDER_OUTPUT_DIR` | `./output` | 归档目录 |
 | `DOUYIN_PROCESS_HISTORY` | `false` | 首次运行是否处理历史转发 |
@@ -740,7 +740,7 @@ rm -rf forwarder_data/browser_profile
 | `FORWARDER_LIVE_PHOTO_MODE` | `video` | `video`（只发视频）/ `live`（只发实况图）/ `both`（两者都发） |
 | `FORWARDER_LIVE_PHOTO_MAX_SECONDS` | `10` | 实况视频最大秒数，超过改发视频 |
 | `FORWARDER_LIVE_PHOTO_MAX_MB` | `10` | 实况视频最大 MB，超过改发视频 |
-| `FORWARDER_LIVE_PHOTO_MAX_ITEMS` | `3` | 实况图数量超过该值实况图回退视频；`0` = 不限 |
+| `FORWARDER_LIVE_PHOTO_MAX_ITEMS` | `10` | 实况图数量超过该值实况图回退视频；`0` = 不限 |
 
 #### 解析 / 归档 / 清理
 
@@ -883,7 +883,7 @@ sudo APP_USER=douyin bash deploy/install_ubuntu.sh
 实况图额外开销：
 
 - 每张实况图归档 **2 个文件**（jpg + mp4）；实测单张约 82 KB + 389 KB，14 张作品约 6–7 MB；
-- `live`/`both` 模式逐条发送，消息数约为实况图张数；`MAX_ITEMS` 默认 3 可避免大图集刷屏。
+- `live`/`both` 模式逐条发送，消息数约为实况图张数；`MAX_ITEMS` 默认 10 可避免大图集刷屏。
 
 建议配置：
 
@@ -1083,14 +1083,14 @@ Telegram 在境内不可直连。搭好代理后（如本机 7890 端口），�
 会。解析记录持久化在 `state.json`：已下载成功的不会重复下载；**解析到一半被中断（比如下载中重启）的视频，重启后会自动补处理**（日志出现 `恢复未完成的消息…`）。只有「首轮水位跳过的历史消息」和「失败 3 次已放弃的」不重试——后者重新转发一次即可重新触发。
 
 **Q17. 实况图为什么还是视频？**
-三种可能：① `FORWARDER_LIVE_PHOTO_MODE` 仍是默认的 `video`；② 实况视频超过 10 秒或 10MB，按规则改发视频；③ 实况图数量超过 `FORWARDER_LIVE_PHOTO_MAX_ITEMS`（默认 3），实况图回退视频。
+三种可能：① `FORWARDER_LIVE_PHOTO_MODE` 仍是默认的 `video`；② 实况视频超过 10 秒或 10MB，按规则改发视频；③ 实况图数量超过 `FORWARDER_LIVE_PHOTO_MAX_ITEMS`（默认 10），实况图回退视频。
 查看启动日志的「实况图模式」和推送日志即可确认；调大限制或设 `MAX_ITEMS=0` 可解除数量限制。
 
 **Q18. 实况图三种模式怎么选？**
 - 想要聊天最干净、最稳：`video`；
 - 想要真正的 Live Photo：`live`（旧客户端只显示静态图）；
 - 想要兼容性最好：`both`（实况图 + 视频，消息数约翻倍）。
-多图实况建议保留 `MAX_ITEMS=3`，避免 14 张图变成 14 条消息。
+多图实况建议保留 `MAX_ITEMS=10`，避免 14 张图变成 14 条消息。
 
 **Q19. 检测模式怎么选？**
 - 默认 `reload`：每轮整页刷新，最稳，适合配置充足/要求实时；
@@ -1142,7 +1142,7 @@ Telegram Bot API 的 `sendMediaGroup` 不支持 Live Photo，只能逐条 `sendL
 - **归档时机**：原项目流水线退出时会清理临时目录，归档发生在 `with ParsePipeline(...)` 块内、清理之前（见 `forwarder/parser_bridge.py` 注释）。
 - **媒体处理**：默认 `FORWARDER_SKIP_MEDIA_PROCESSING=true`——原项目的媒体处理是为适配 Telegram 限制（转码/长图切割）而设计的，本服务归档原始文件即可；如需与原项目完全一致的产物，可设为 `false`。
 - **检测模式**：reload 每轮 `page.reload` 后重新拉取 `get_message_by_init`；probe 用一次 `page.evaluate` 读取会话列表/消息尾部生成指纹，变化或到期才点会话取 `get_by_conversation`，并用 `expect_response` 精确等待；连续失败/探针读不到/定时触发自愈 reload。
-- **实况图**：抖音 `aweme_detail.images[].video` → parsehub `LivePhotoRef` → 下载为 `LivePhotoFile`（jpg + mp4）；`forwarder/tg_push.py` 用 pyrogram `send_live_photo(photo, live_photo)` 发送；超过 10 秒/10MB 或数量超过阈值时回退视频。
+- **实况图**：抖音 `aweme_detail.images[].video` → parsehub `LivePhotoRef` → 下载为 `LivePhotoFile`（jpg + mp4）；`forwarder/live_photo.py` 直接走 MTProto（UploadMedia + SendMedia）发送，规避 kurigram 2.2.26 `InputMediaLivePhoto` 的 cover 引用错误；超过 10 秒/10MB 或数量超过阈值时回退视频。
 - **Telegram Live Photo 限制**：Bot API `sendLivePhoto` 需要静态图 + 视频两个文件，视频 ≤10s/≤10MB；`sendMediaGroup` 不支持 Live Photo，因此多图只能逐条发送。
 - **状态与恢复**：`state.json` 区分 `seen_messages`（已识别）与 `settled`（已有定论），配合 `_inflight` 实现重启后补处理；`failures` 最多重试 3 次后进入 `gave_up`。
 - **归档**：`archive_result` 在原项目临时目录清理前复制媒体；实况图额外复制 `source.video_path`，并在 `metadata.json` 写入 `live_photo_count`。
@@ -1155,6 +1155,7 @@ Telegram Bot API 的 `sendMediaGroup` 不支持 Live Photo，只能逐条 `sendL
 
 | 日期 | 内容 |
 | --- | --- |
+| 2026-11-14 | 修复 Live Photo 上传失败（kurigram 2.2.26 cover 引用错误）；实况图数量上限默认 3 → 10 |
 | 2026-10-25 | 实况图（Live Photo）三模式：`video` / `live` / `both`；超限自动改发视频；归档 jpg+mp4；控制台 `live` 命令 |
 | 2026-10-23 | 检测模式 `reload` / `probe`：probe 用 DOM 探针 + 定期取数 + 自愈，请求量约降 95% |
 | 2026-10-18 | 部署时可选解析端 cookie 方式 + 自动同步小号 cookie |

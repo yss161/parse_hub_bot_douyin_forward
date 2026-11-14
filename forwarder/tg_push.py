@@ -25,6 +25,7 @@ from typing import Any
 from log import logger
 
 from .config import ForwarderSettings, normalize_live_photo_mode
+from .live_photo import send_live_photo
 
 logger = logger.bind(name="Forwarder/TgPush")
 
@@ -347,11 +348,12 @@ class TgPusher:
         return True
 
     async def _send_live(self, photo: Path, video: Path, caption: str) -> None:
-        """发送一条 Live Photo（静态图 + 实况视频）。"""
-        await self._cli.send_live_photo(
+        """发送一条 Live Photo（修正 kurigram 2.2.26 的 cover 引用问题）。"""
+        await send_live_photo(
+            self._cli,
             self._target,
-            live_photo=str(video),
-            photo=str(photo),
+            photo=photo,
+            video=video,
             caption=caption or "",
         )
 

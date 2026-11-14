@@ -45,7 +45,7 @@ outline: deep
 | `FORWARDER_LIVE_PHOTO_MODE` | `video` | `video`（只发视频）/ `live`（只发实况图）/ `both`（两者都发） |
 | `FORWARDER_LIVE_PHOTO_MAX_SECONDS` | `10` | 实况视频最大秒数，超过改发视频 |
 | `FORWARDER_LIVE_PHOTO_MAX_MB` | `10` | 实况视频最大 MB，超过改发视频 |
-| `FORWARDER_LIVE_PHOTO_MAX_ITEMS` | `3` | 实况图数量超过该值回退视频；`0` = 不限 |
+| `FORWARDER_LIVE_PHOTO_MAX_ITEMS` | `10` | 实况图数量超过该值回退视频；`0` = 不限 |
 
 ## 解析 / 归档 / 清理
 
@@ -104,7 +104,7 @@ DOUYIN_FORCE_FETCH_INTERVAL=45
 
 # 实况图（默认 video；想发 Live Photo 选 live / both）
 FORWARDER_LIVE_PHOTO_MODE=both
-FORWARDER_LIVE_PHOTO_MAX_ITEMS=3
+FORWARDER_LIVE_PHOTO_MAX_ITEMS=10
 
 # Telegram 推送
 TG_PUSH=true
