@@ -50,74 +50,53 @@ _CMD_ALIASES = {
     "通知": "notify",
 }
 
-_HELP = """🤖 抖音转发 Bot 控制台（仅 owner 可用）
+_PRIVATE_COMMANDS = (
+    ("start", "绑定 owner / 显示帮助"),
+    ("help", "查看命令说明"),
+    ("status", "服务器与转发状态"),
+    ("stats", "最近 N 天统计"),
+    ("last", "最近归档与失败"),
+    ("failures", "失败收件箱"),
+    ("retry", "重试失败作品"),
+    ("search", "搜索本地归档"),
+    ("parse", "解析抖音链接"),
+    ("pause", "暂停抖音轮询"),
+    ("resume", "恢复抖音轮询"),
+    ("notify", "失败通知开关/测试"),
+    ("unbind", "解除 owner 绑定"),
+)
 
-【首次绑定】
-  /start <绑定码>       绑定 owner；/auth <绑定码> 作用相同
-  说明：绑定码来自服务器 .env 的 FORWARDER_BOT_BIND_CODE。
-  第一个绑定成功的账号成为唯一 owner；同一个绑定码随即失效。
-  绑定码默认从服务启动起 15 分钟内有效（FORWARDER_BIND_CODE_TTL）。
+_GROUP_COMMANDS = (
+    ("parse", "解析抖音链接"),
+)
 
-【状态与统计】
-  /status               服务器 + 转发状态（也可用 /server、/系统）
-      主机 / 系统 / Python 版本；运行时长与服务状态；
-      CPU 核数、1/5/15 分钟负载、当前采样占用；
-      内存、磁盘、Python 与 Chromium 占用；
-      检测模式：reload=整页刷新，probe=接口探针；
-      是否暂停、解析队列长度；
-      最近轮询 / 候选 / 成功 / 失败 / 推送距现在多久；
-      TG 推送目标、owner、未结失败数、今日归档、浏览器重启次数。
+_HELP = """🤖 抖音转发控制台
+仅 owner 可用；绑定码一次性。
 
-  /stats [天数]         统计最近 N 天，默认 1 天，范围 1-30
-      例：/stats 7
-      解析成功 / 重复跳过 / 失败 / 重试 / 磁盘不足跳过；
-      推送成功 / 推送失败 / 今日归档 / 未结失败。
-      “重复跳过”包括链接、视频 ID、内容哈希三种命中。
+【开始】
+/start <绑定码> — 绑定 owner
+/help — 显示本菜单
 
-  /last                 最近 5 条归档 + 最近 5 条失败
+【查看】
+/status — 服务器、CPU/内存/磁盘、运行状态
+/stats [天数] — 最近 1-30 天统计，默认 1 天
+/last — 最近 5 条归档与失败
+/failures — 失败收件箱（编号 / 分类 / 链接）
+/search <关键词> — 搜索本地归档
 
-【失败处理】
-  /failures             失败收件箱：编号、类别、状态、原链接
-      优先显示已放弃（gave_up）的记录；没有则显示待重试（open）。
-  /retry <编号>         重试 /failures 里的一条；编号就是 #后面的数字
-      会把该作品重新加入解析队列，并清除“已放弃”状态。
-      地区版权、审核不通过、作者私密等永久错误，重试通常仍会失败。
+【处理】
+/parse <链接> — 解析抖音链接，也可直接发链接
+/retry <编号> — 重试失败作品
+/notify on|off|test — 失败通知开关 / 测试
+/pause — 暂停抖音轮询
+/resume — 恢复轮询
+/unbind — 解除 owner 绑定
 
-【解析与查询】
-  /search <关键词>      搜索本地已归档作品（标题 / 作者 / 作品ID / 链接）
-      只搜本地数据库，不搜索抖音；不支持正则。
-  /parse <抖音链接>     立即解析一条链接（owner 专用）
-      也可直接发送抖音链接，不必加 /parse。
-      支持 v.douyin.com 短链和 www.douyin.com/video/... 链接。
-      解析是异步排队：先回复“已加入队列”，完成后在频道推送并私聊回报。
-      同一作品会按链接 / 视频 ID / 内容哈希去重，不会重复下载。
-
-【运行控制】
-  /pause                暂停抖音轮询；已在队列中的任务仍会继续
-      不停止服务，也不影响已经开始的 Telegram 推送。
-  /resume               恢复抖音轮询（/继续、/恢复 同义）
-
-【通知与绑定】
-  /notify on            开启失败通知（默认开）
-  /notify off           关闭主动私聊，失败仍会进入 /failures
-  /notify test          发一条测试私聊，确认 bot 能主动联系你
-  /unbind               解除 owner 绑定
-      注意：旧绑定码不会恢复；要重新绑定，需在 .env 换新码并重启服务。
-
-【群组】
-  仅在关联讨论组、且发送者是 owner 时处理：
-    @bot /parse <链接>  或直接发抖音链接
-  普通群、频道帖子不会触发解析。群开启 privacy mode 时，用 /parse 命令最稳。
-
-【中文命令】
-  /状态 /服务器 /系统 /统计 /最近 /失败 /重试 /搜索 /解析
-  /暂停 /继续 /恢复 /通知 /帮助 /解绑
-  功能与对应英文命令相同。
-
-【备注】
-  - 所有命令只接受 owner；其他人发链接会提示先绑定。
-  - 失败卡片上的按钮：🔁 重试、🗑 忽略、ℹ️ 详情。
-  - bot 不修改 .env；解析缓存与归档会按配置自动清理，详见部署文档。
+【说明】
+• 所有命令仅 owner 可用；其他人会提示先绑定。
+• 失败卡片按钮：🔁 重试 / 🗑 忽略 / ℹ️ 详情。
+• 群组仅在关联讨论组内、由 owner 发 /parse 或链接时生效。
+• 中文命令同样可用：/状态 /统计 /最近 /失败 /解析 /重试 /搜索 /暂停 /继续 /通知 /帮助 /解绑
 """
 
 
@@ -138,6 +117,7 @@ class ControlPlane:
         self.runtime = runtime
         self.receiver = receiver
         self._client: Any = None
+        self._menu_task: Any = None
         self._job_sink: Callable[[ParseJob], None] | None = None
         self._wake: Callable[[], None] | None = None
         self._bind_started = time.monotonic()
@@ -219,7 +199,43 @@ class ControlPlane:
         async def _callback(_, query: Any) -> None:  # noqa: ANN001
             await self.handle_callback(query)
 
+        try:
+            self._menu_task = asyncio.create_task(self.setup_command_menu(client))
+        except RuntimeError as e:
+            logger.warning(f"设置 Bot 命令菜单失败（没有运行中的事件循环）: {e}")
+
         logger.info("Bot 控制台已注册（私聊命令、按钮、群组 /parse）")
+
+    async def setup_command_menu(self, client: Any) -> None:
+        """设置 Telegram 的 / 命令菜单（私聊全量，讨论组仅 /parse）。"""
+        try:
+            from pyrogram import types
+        except Exception as e:
+            logger.warning(f"设置 Bot 命令菜单跳过（Pyrogram 不可用）: {e}")
+            return
+
+        private = [types.BotCommand(cmd, desc) for cmd, desc in _PRIVATE_COMMANDS]
+        try:
+            await client.set_bot_commands(
+                private,
+                scope=types.BotCommandScopeAllPrivateChats(),
+            )
+            logger.info(f"Bot 命令菜单已更新（私聊 {len(private)} 条）")
+        except Exception as e:
+            logger.warning(f"设置私聊命令菜单失败: {e}")
+
+        group_id = int(getattr(self.pusher, "discussion_group_id", 0) or 0)
+        if not group_id:
+            return
+        group = [types.BotCommand(cmd, desc) for cmd, desc in _GROUP_COMMANDS]
+        try:
+            await client.set_bot_commands(
+                group,
+                scope=types.BotCommandScopeChat(chat_id=group_id),
+            )
+            logger.info(f"Bot 命令菜单已更新（讨论组 {len(group)} 条）")
+        except Exception as e:
+            logger.warning(f"设置讨论组命令菜单失败: {e}")
 
     # ────────────────────────── 绑定 ──────────────────────────
 
