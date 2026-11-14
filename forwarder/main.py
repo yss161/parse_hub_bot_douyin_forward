@@ -145,10 +145,13 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
                  else ("（视频发频道，实况图发评论区）" if _live_mode == "comment" else "（只发视频）")))
         + f"；限制 ≤{settings.live_photo_max_seconds}s / ≤{settings.live_photo_max_mb}MB"
         + (
-            (f"；评论区最多 {settings.live_photo_max_items} 张" if _live_mode == "comment"
-             else f"；实况图超过 {settings.live_photo_max_items} 张回退视频")
-            if settings.live_photo_max_items > 0
-            else "；实况图数量不限制"
+            f"；评论区不限量，逐条间隔 {settings.live_photo_send_interval:g}s"
+            if _live_mode == "comment"
+            else (
+                f"；实况图超过 {settings.live_photo_max_items} 张回退视频"
+                if settings.live_photo_max_items > 0
+                else "；实况图数量不限制"
+            )
         )
     )
 
