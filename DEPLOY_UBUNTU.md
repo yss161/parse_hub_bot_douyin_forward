@@ -86,7 +86,7 @@ sudo APP_USER=douyin bash deploy/install_ubuntu.sh
 2. 检测 Python ≥ 3.12（不足则自动装 `python3.12`）；
 3. 创建虚拟环境 `.venv`，安装 `requirements-forwarder.txt`（默认**腾讯云 PyPI 镜像**，失败自动回退官方源）；
 4. 安装 Playwright Chromium 浏览器；
-5. 生成 `.env`（若不存在），并**交互式询问监测账号**（单会话 / 多会话）、**解析端 Cookie 方式**、**检测模式**（reload / probe）、**实况图模式**（video / live / both / comment），按选择写入 .env；
+5. 生成 `.env`（若不存在），并**交互式询问监测账号**（单会话 / 多会话）、**解析端 Cookie 方式**、**检测模式**（reload / probe）、**实况图模式**（video / live / both / comment）、**Bot 控制台**（是否生成 owner 绑定码），按选择写入 .env；
 6. 安装 systemd 服务 `douyin-forward`（**安装但不启动**）；
 7. 打印「首次登录 + 启动服务」的后续步骤。
 
@@ -215,6 +215,7 @@ PARSER_COOKIE_MODE=auto sudo -E bash deploy/install_ubuntu.sh
 - **选 2/3**：适合想保留 Live Photo 效果的场景；
 - **选 4**：频道只展示视频/相册，Live Photo 逐条进该帖评论区；需先开启频道评论区并把 bot 拉进讨论组；
 - 已部署后随时重配：`sudo bash /opt/douyin_download_bot/deploy/configure_live_photo.sh`；
+- 生成/重置 Bot owner 绑定码：`sudo bash /opt/douyin_download_bot/deploy/configure_bot_console.sh`，重启服务后私聊 bot 发送 `/start <绑定码>`；
 - 非交互部署：`LIVE_PHOTO_MODE=comment sudo -E bash deploy/install_ubuntu.sh`。
 
 > 运行中也可**免重启**切换：`echo "live comment" | sudo tee forwarder_data/agent_cmd.txt`（`live video` 切回，`live` 查看当前模式）。
@@ -387,7 +388,7 @@ sudo systemctl status douyin-forward       # 状态
 | 重置解析记录 | `rm forwarder_data/state.json && sudo systemctl restart douyin-forward` |
 | 更换/追加监测账号（免重启） | `echo "小明,小红" \| sudo tee .../forwarder_data/agent_cmd.txt`（设为两个）；`echo "+小刚" \| sudo tee ...`（追加）；`echo "-小明" \| sudo tee ...`（移除）；`echo reset \| sudo tee ...`（恢复 .env 默认值） |
 | 重配监测模式（改 .env） | `sudo bash /opt/douyin_download_bot/deploy/configure_accounts.sh`（单会话/多会话交互选择），再 `sudo systemctl restart douyin-forward` |
-| 登录/验证期间远程操作 | `echo 1 \| sudo tee .../forwarder_data/agent_cmd.txt` 点击菜单第 1 项；`echo 123456 \| sudo tee ...` 填验证码（详见 README「远程控制台」） |
+| 登录/验证期间远程操作 | `echo 1 \| sudo tee .../forwarder_data/agent_cmd.txt` 点击菜单第 1 项；`echo 123456 \| sudo tee ...` 填验证码（详见 README「文件控制台」） |
 | 重置登录态 | `rm -rf forwarder_data/browser_profile && sudo systemctl restart douyin-forward`（需重新登录） |
 | 备份登录态 | 定期打包 `forwarder_data/browser_profile/` 留存，登录失效时可快速恢复 |
 | 设置时区 | `sudo timedatectl set-timezone Asia/Shanghai`（日志时间更直观，可选） |
@@ -513,7 +514,7 @@ journalctl -u douyin-forward --since "30 min ago" | grep -E "已锁定|登录操
 
 ---
 
-## 11. 远程控制台指令速查（forwarder_data/agent_cmd.txt）
+## 11. 文件控制台指令速查（forwarder_data/agent_cmd.txt）
 
 服务运行期间（登录等待每 3 秒、日常轮询每轮）都会检查这个文件：把内容写进去（UTF-8，每行一条，可多行）即可执行，**执行后文件自动删除**。这是「登录编号菜单 / 验证码直填 / 对话式加账号」的统一入口，无需记任何指令。
 
@@ -575,7 +576,7 @@ echo menu        | sudo tee /opt/douyin_download_bot/forwarder_data/agent_cmd.tx
 | `FORWARDER_LIVE_PHOTO_MODE` | `video` | 实况图模式：`video` / `live` / `both` / `comment` |
 | `FORWARDER_LIVE_PHOTO_MAX_SECONDS` | `10` | 实况视频最大秒数，超过改发视频 |
 | `FORWARDER_LIVE_PHOTO_MAX_MB` | `10` | 实况视频最大 MB，超过改发视频 |
-| `FORWARDER_LIVE_PHOTO_MAX_ITEMS` | `10` | 非 comment：超过该值回退视频；comment：只限制评论区条数；`0` = 不限 |
+| `FORWARDER_LIVE_PHOTO_MAX_ITEMS` | `10` | 只对 `live` / `both` 生效：超过该值回退视频；`comment` 不限量；`0` = 不限 |
 | `DOUYIN_ONLY_OTHERS` | `true` | 只处理对方（大号）发来的消息 |
 | `DOUYIN_PROCESS_HISTORY` | `false` | 首次运行是否处理历史转发 |
 
@@ -587,6 +588,18 @@ echo menu        | sudo tee /opt/douyin_download_bot/forwarder_data/agent_cmd.tx
 | `TG_TARGET_CHAT` | 空 | `@用户名` / `-100` 数字 ID / t.me 链接 |
 | `API_ID` / `API_HASH` / `BOT_TOKEN` | 空 | my.telegram.org 申请 + @BotFather 建机器人 |
 | `BOT_PROXY` | 空 | 国内服务器代理，如 `http://127.0.0.1:7890` |
+
+### Bot 控制台 / 失败通知（可选）
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `FORWARDER_BOT_CONSOLE` | `true` | 启用私聊控制台 |
+| `FORWARDER_BOT_BIND_CODE` | 空 | owner 一次性绑定码；建议脚本生成 |
+| `FORWARDER_BIND_CODE_TTL` | `900` | 绑定码有效期（秒，从服务启动计时） |
+| `FORWARDER_FAILURE_NOTIFY` | `true` | 失败达到上限时私聊 owner |
+| `FORWARDER_MIN_FREE_GB` | `3.0` | 可用空间低于该值暂停解析 |
+| `FORWARDER_SUMMARY_ENABLED` | `true` | 每日摘要（周一发周报） |
+| `FORWARDER_CONTENT_HASH` | `true` | 内容级去重 |
 
 ### 登录预览链接（截图变可点击链接）
 

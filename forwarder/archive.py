@@ -19,6 +19,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .hashing import content_hash_for_files
+
 # 从抖音链接中提取视频/图文 ID（用于目录命名与去重指纹）
 _VIDEO_ID_RE = re.compile(r"/(?:video|note|slides)/(\d+)")
 _SHORT_ID_RE = re.compile(r"v\.douyin\.com/([A-Za-z0-9_\-]+)")
@@ -38,6 +40,12 @@ def video_key_from_url(url: str) -> str:
 class ArchiveResult:
     dir: Path
     files: list[Path] = field(default_factory=list)
+    content_hash: str = ""
+    video_id: str = ""
+    title: str = ""
+    author: str = ""
+    live_count: int = 0
+    size: int = 0
 
 
 def _defensive_get(obj: Any, *names: str, default: Any = None) -> Any:
@@ -95,6 +103,7 @@ def build_metadata(
     source_url: str,
     raw_url: str,
     files: list[Path],
+    content_hash: str = "",
 ) -> dict[str, Any]:
     media_files = []
     for f in files:
@@ -120,6 +129,8 @@ def build_metadata(
         "source_url": source_url,   # 私信里提取到的链接（可能是短链）
         "raw_url": raw_url,         # 原项目 get_raw_url 展开后的原始链接
         "video_key": video_key_from_url(raw_url) or video_key_from_url(source_url),
+        "video_id": video_key_from_url(raw_url) or video_key_from_url(source_url),
+        "content_hash": content_hash,
         "media": media_files,
         "archived_at": datetime.now().astimezone().isoformat(timespec="seconds"),
     }
@@ -171,11 +182,31 @@ def archive_result(
             shutil.copy2(extra, dst)
             used_names.add(name)
 
+    content_hash = content_hash_for_files(copied)
+    meta = build_metadata(
+        result.parse_result,
+        source_url=source_url,
+        raw_url=raw_url,
+        files=copied,
+        content_hash=content_hash,
+    )
     if save_metadata:
-        meta = build_metadata(result.parse_result, source_url=source_url, raw_url=raw_url, files=copied)
         (target / "metadata.json").write_text(
             json.dumps(meta, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
 
-    return ArchiveResult(dir=target, files=copied)
+    media_items = _defensive_get(result.parse_result, "media", default=[]) or []
+    if not isinstance(media_items, (list, tuple)):
+        media_items = [media_items]
+    live_count = sum(1 for m in media_items if getattr(m, "video_url", None))
+    return ArchiveResult(
+        dir=target,
+        files=copied,
+        content_hash=content_hash,
+        video_id=str(meta.get("video_id") or ""),
+        title=str(meta.get("title") or ""),
+        author=str(meta.get("author") or ""),
+        live_count=live_count,
+        size=sum(f.stat().st_size for f in copied),
+    )

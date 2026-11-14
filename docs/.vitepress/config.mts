@@ -55,6 +55,7 @@ export default defineConfig({
             { text: '检测模式', link: '/guide/detection' },
             { text: '实况图（Live Photo）', link: '/guide/live-photo' },
             { text: '归档与去重', link: '/guide/archive' },
+            { text: 'Bot 控制台', link: '/guide/console' },
             { text: 'Telegram 推送', link: '/guide/telegram' }
           ]
         },

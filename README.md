@@ -50,7 +50,7 @@ pnpm docs:dev
 ## 目录
 
 - [文档站点](#docs-site) · [功能特性](#features) · [工作流程](#flow) · [与原项目的关系](#relation) · [目录结构](#layout)
-- [环境要求](#requirements) · [快速开始](#quickstart) · [运行模式](#run-modes) · [远程控制台](#console)
+- [环境要求](#requirements) · [快速开始](#quickstart) · [运行模式](#run-modes) · [文件控制台](#console)
 - [检测模式](#detect-mode) · [实况图](#live-photo) · [归档与元数据](#archive) · [去重与状态](#dedupe)
 - [本地缓存清理](#cache) · [配置说明](#config) · [推送到 Telegram](#tg-push) · [部署到 Ubuntu](#deploy)
 - [性能与资源](#performance) · [故障排查速查](#troubleshooting) · [常见问题](#faq)
@@ -66,14 +66,19 @@ pnpm docs:dev
 | 双检测模式 | `reload`（整页刷新，最稳）/ `probe`（DOM 探针 + 定期取数，省资源），运行中可切换 |
 | 多会话监测 | 同时监测多个大号/聊天用户，按昵称锁定会话，其他会话的分享一律忽略 |
 | 接口优先提取 | 直接读取私信消息接口中的 `itemId`，准确、无需点击视频卡片 |
-| 三层去重 | 消息指纹 + 链接指纹 + 视频 ID 指纹；换链接重复转发也不会重复下载 |
+| 四层去重 | 消息指纹 + 链接指纹 + 视频 ID 指纹 + 文件内容 SHA-256；换链接/换账号重复转发也不会重复上传 |
 | 实况图支持 | 识别 `LivePhotoFile`，按 `video` / `live` / `both` / `comment` 四种模式推送；超限自动改发视频，`comment` 可把 Live Photo 发到评论区 |
 | Telegram 推送 | 视频带封面流式播放、图文相册、GIF、Live Photo；失败自动降级文档 |
 | 归档与元数据 | 原始媒体 + `metadata.json`（标题/作者/链接/媒体类型/实况图数量） |
-| 远程控制台 | 写 `agent_cmd.txt` 即可换昵称、切检测/实况图模式、填验证码、点登录菜单，免重启 |
+| 文件控制台 | 写 `agent_cmd.txt` 即可换昵称、切检测/实况图模式、填验证码、点登录菜单，免重启 |
+| Bot 控制台 | Telegram 私聊绑定唯一 owner；`/status` 看服务器、`/retry` 重试失败、发链接直接解析 |
+| 失败收件箱 | 失败分类 + 指数退避 + SQLite 落库；永久错误只试一次，达到上限推送卡片（重试/忽略/详情） |
+| 内容级去重 | 消息/链接/视频 ID 之外，再按最大媒体文件 SHA-256 去重 |
+| 自愈与告警 | 浏览器看门狗（无响应/内存/空闲重启）、磁盘水位、静默告警、外部心跳、每日摘要 |
+| 本地索引 | SQLite 记录归档、失败和每日统计，支持 `/search`、`/stats`、`/last` |
 | 登录辅助 | 二维码字符画/base64、编号菜单、页面预览链接 |
 | 缓存清理 | 推送成功即删 + 定时 TTL 清理，磁盘不会无限增长 |
-| 部署友好 | 一键 Ubuntu 脚本 + systemd + 交互式配置（账号 / 检测模式 / 实况图 / cookie） |
+| 部署友好 | 一键 Ubuntu 脚本 + systemd + 交互式配置（账号 / 检测模式 / 实况图 / cookie / Bot 绑定） |
 | 零改动原项目 | `parse_hub_bot` 作为 git 子模块，解析/下载/媒体处理全部复用，未改一行 |
 
 <a id="flow"></a>
@@ -96,7 +101,9 @@ pnpm docs:dev
              ↓
        TgPusher：视频 / 图片相册 / GIF / Live Photo（按模式）
              ↓
-       推送成功后按配置删除本地归档；定时清理过期缓存
+       推送成功后按配置删除本地归档；SQLite 记录归档/消息 ID/统计
+             ↓
+       Owner 控制台：/status /stats /last /failures /retry /search；每日摘要/告警
 ```
 
 各阶段对应代码：
@@ -109,7 +116,11 @@ pnpm docs:dev
 | 归档 | [forwarder/archive.py](forwarder/archive.py) |
 | 去重 / 水位 | [forwarder/state.py](forwarder/state.py) |
 | Telegram 推送 | [forwarder/tg_push.py](forwarder/tg_push.py) |
-| 服务主循环 / 缓存清理 | [forwarder/main.py](forwarder/main.py) |
+| 服务主循环 / 队列 / 缓存清理 | [forwarder/main.py](forwarder/main.py) |
+| Bot 控制台 / 失败卡片 | [forwarder/control.py](forwarder/control.py) |
+| 失败分类 / 退避 | [forwarder/failures.py](forwarder/failures.py)、[forwarder/state.py](forwarder/state.py) |
+| 本地索引（SQLite） | [forwarder/store.py](forwarder/store.py) |
+| 服务器信息 / 看门狗 | [forwarder/sysinfo.py](forwarder/sysinfo.py)、[forwarder/douyin_web.py](forwarder/douyin_web.py) |
 | 配置 | [forwarder/config.py](forwarder/config.py) / [.env.example](.env.example) |
 
 
@@ -125,6 +136,7 @@ pnpm docs:dev
 | 抖音 Web 接收端（小号收私信） | 本项目 `forwarder/douyin_web.py` | 新增 |
 | 桥接与归档 | 本项目 `forwarder/parser_bridge.py`、`archive.py` | 新增 |
 | 服务入口 | 本项目 `run.py`、`forwarder/main.py` | 新增 |
+| Bot 控制台 / 失败通知 | 本项目 `forwarder/control.py` | 复用同一个 bot Client，不额外起进程 |
 | Telegram 推送（可选） | 复用原项目构建逻辑（`build_caption` / `build_input_media`） | 新增 `forwarder/tg_push.py`，pyrogram 直连发送 |
 
 原项目以 **git 子模块**引入（固定在某个上游提交上，一行代码未改），可通过以下命令验证：
@@ -148,10 +160,17 @@ douyin_download_bot/
 ├── parse_hub_bot/               # 原项目（git 子模块，未改动）
 ├── forwarder/                   # 新增：转发链路
 │   ├── config.py                #   配置（读 .env / 环境变量）
-│   ├── douyin_web.py            #   抖音网页接收端（登录+双检测模式+链接提取+远程控制台）
+│   ├── douyin_web.py            #   抖音网页接收端（登录+双检测模式+链接提取+文件控制台）
 │   ├── parser_bridge.py         #   桥接原项目解析流水线
-│   ├── archive.py               #   归档（复制媒体 + metadata.json）
-│   ├── state.py                 #   去重（消息/链接/视频ID）/水位/会话设置值
+│   ├── archive.py               #   归档（复制媒体 + metadata.json + 内容哈希）
+│   ├── state.py                 #   去重（消息/链接/视频ID/内容哈希）/水位/退避
+│   ├── control.py               #   Telegram Bot 控制台 / 失败卡片
+│   ├── failures.py              #   失败分类与重试策略
+│   ├── hashing.py               #   最大媒体文件 SHA-256
+│   ├── jobs.py                  #   解析任务队列模型
+│   ├── runtime.py               #   运行期状态
+│   ├── store.py                 #   SQLite 归档 / 失败 / 统计索引
+│   ├── sysinfo.py               #   服务器 CPU/内存/磁盘/进程信息
 │   ├── shot_server.py           #   登录截图/菜单的只读 HTTP 服务（日志输出可点击链接）
 │   ├── reporter.py              #   日志版状态报告器
 │   ├── tg_push.py               #   Telegram 推送（可选，TG_PUSH=true 启用）
@@ -164,6 +183,7 @@ douyin_download_bot/
 │   ├── configure_accounts.sh    #   交互式配置：单会话 / 多会话
 │   ├── configure_detect_mode.sh #   交互式配置：检测模式 reload / probe
 │   ├── configure_live_photo.sh  #   交互式配置：实况图 video / live / both / comment
+│   ├── configure_bot_console.sh #   交互式配置：Bot 控制台 / owner 绑定码
 │   ├── configure_parser_cookie.sh #  交互式配置：解析端 cookie 方式
 │   └── douyin-forward.service   #   systemd 服务模板
 ├── docs/                        # 文档站点（VitePress，GitHub Pages）
@@ -238,7 +258,7 @@ DOUYIN_MAIN_ACCOUNTS=小明,小红
 
 > 💡 **Ubuntu 一键部署时脚本会交互式询问「单会话 / 多会话」并代填**（见 [DEPLOY_UBUNTU.md](DEPLOY_UBUNTU.md)）；
 > 已经部署好的也可以随时重新选择：`sudo bash deploy/configure_accounts.sh`。
-> 运行中还可以完全不改配置——往 `forwarder_data/agent_cmd.txt` 写昵称即可免重启更换（见「远程控制台」）。
+> 运行中还可以完全不改配置——往 `forwarder_data/agent_cmd.txt` 写昵称即可免重启更换（见「文件控制台」）。
 
 其余项均有默认值（详见 [.env.example](.env.example) 内注释）。
 
@@ -308,7 +328,7 @@ python run.py cookie-config clear                      # 清空（改走移动�
 
 <a id="console"></a>
 
-## 远程控制台（登录操作 / 更换监测昵称）
+## 文件控制台（agent_cmd.txt）
 
 服务运行期间（登录等待、日常轮询），**把一句话写入 `forwarder_data/agent_cmd.txt`** 即可与它「对话」；
 文件会被服务读取后自动删除，可一次写多行（每行一条，按顺序执行）。
@@ -376,6 +396,43 @@ echo "123456 go" > forwarder_data/agent_cmd.txt  # 填入并回车提交（一�
   ③ 仍可用 `scp` 下载 `forwarder_data/login_qr.png`；
 - 安全说明：该服务**只暴露白名单文件**（登录二维码/页面截图/菜单），不含任何登录态文件；
   但仍建议限制访问来源，或登录完成后以 `FORWARDER_SHOT_PORT=0` 关闭。
+
+### Telegram Bot 控制台（Owner）
+
+除了写文件，还可以用 Telegram 私聊远程运维。先配置：
+
+```ini
+FORWARDER_BOT_CONSOLE=true
+FORWARDER_BOT_BIND_CODE=64位随机十六进制
+FORWARDER_FAILURE_NOTIFY=true
+```
+
+或用脚本生成并写入：
+
+```bash
+sudo bash deploy/configure_bot_console.sh
+sudo systemctl restart douyin-forward
+```
+
+然后在 Telegram 私聊 bot 发送 `/start <绑定码>`。第一个绑定成功的账号成为唯一 owner，同一绑定码立即失效；`/unbind` 后需更换新码并重启才能重新绑定。
+
+| 命令 | 作用 |
+| --- | --- |
+| `/help` | 中文命令帮助：每个指令的参数、作用和注意事项 |
+| `/status` / `/server` | 服务器 CPU/内存/磁盘/进程/Chromium + 转发状态（检测模式、队列、最近候选/成功/失败） |
+| `/stats [天数]` | 成功/重复/失败/重试/推送统计 |
+| `/last` | 最近归档 + 最近失败 |
+| `/failures` | 失败收件箱 |
+| `/retry <编号>` | 重新解析失败作品 |
+| `/search <关键词>` | 搜索本地归档 |
+| `/parse <链接>` | 直接提交解析（也可直接发链接） |
+| `/pause` / `/resume` | 暂停 / 恢复轮询 |
+| `/notify on\|off\|test` | 失败通知开关 / 测试 |
+| `/unbind` | 解除 owner |
+
+也支持中文命令：`/状态` `/服务器` `/统计` `/最近` `/失败` `/重试` `/搜索` `/解析` `/暂停` `/继续` `/通知` `/帮助` `/解绑`，与英文命令等价。失败达到上限时会收到卡片，按钮为「重试 / 忽略 / 详情」。永久错误（地区版权、审核不通过、作者私密等）只尝试 1 次；临时错误按 60s → 120s → … 退避，上限 1800s。
+
+> 绑定码默认从服务启动起 15 分钟有效（`FORWARDER_BIND_CODE_TTL=900`）；过期后重启服务即可。完整说明见[在线文档 Bot 控制台](https://blog.mojian.fan/parse_hub_bot_douyin_forward/guide/console)。
 
 <a id="detect-mode"></a>
 
@@ -636,6 +693,7 @@ output/
 | `source_url` | 私信里提取到的原始链接（可能是短链） |
 | `raw_url` | 展开后的真实链接 |
 | `video_key` | 作品 ID（用于目录命名/排查） |
+| `content_hash` | 最大媒体文件 SHA-256（内容级去重） |
 | `media` | 实际归档文件列表（文件名 + 字节数） |
 | `archived_at` | 归档时间（带时区） |
 
@@ -649,23 +707,27 @@ output/
 
 去重状态保存在 `forwarder_data/state.json`（原子写入；损坏时自动改名为 `*.corrupt` 并从空状态开始）。
 
-### 三层去重
+### 四层去重
 
 | 层级 | 记录内容 | 作用 |
 | --- | --- | --- |
 | 消息指纹 | 消息 HTML/文本的 SHA1 | 防止同一条私信被重复点击/重复提取 |
 | 链接指纹 | 输入链接 + 展开后的真实链接 | 防止同一链接被重复解析 |
 | 视频 ID 指纹 | `video/<id>`、`modal_id`、`aweme_id` 中的作品 ID | 同一作品换短链/长链/重复转发也只处理一次 |
+| 内容哈希 | 归档媒体中最大文件的 SHA-256 | 同一文件换账号/换链接重新发布时，跳过重复上传 |
+
+> 内容哈希默认开启（`FORWARDER_CONTENT_HASH=true`），命中时删除新归档副本、不推送，并回复「内容与已归档作品重复」。旧版本已归档的作品没有哈希记录，仍按前三层判断。
 
 ### 状态桶
 
 | 桶 | 说明 |
 | --- | --- |
 | `processed` | 已成功解析/归档的链接与视频 ID |
+| `content` | 已归档媒体的内容哈希 |
 | `seen_messages` | 已识别过的消息指纹 |
 | `settled` | 已有定论（成功/放弃/首轮水位跳过），不再重试 |
-| `failures` | 失败次数与最后一次错误（最多重试 3 次） |
-| `gave_up` | 超过重试次数后放弃的记录 |
+| `failures` | 失败次数、分类、链接与下次重试时间 |
+| `gave_up` | 达到重试上限后放弃的记录 |
 | `flags` | 运行标记（如 `history_initialized`） |
 | `values` | 控制台设置（监测昵称、检测模式、实况图模式） |
 
@@ -673,7 +735,9 @@ output/
 
 - **首次运行**：默认只记录当前消息水位，不处理历史消息（`DOUYIN_PROCESS_HISTORY=false`）；如需处理历史，设为 `true` 并删除 `state.json` 后重启。
 - **重启恢复**：已识别但未定论、且不在当前处理中的消息，会被视为「上次中断」并自动补处理；日志出现 `恢复未完成的消息…`。
-- **失败重试**：解析失败会撤销 `seen_messages` 标记，下一轮重试；累计 3 次失败后写入 `gave_up` 并停止重试。
+- **失败重试**：临时错误按 60s → 120s → … 指数退避，到期后自动重新入队；永久错误（地区版权/审核不通过/作者私密等）只尝试 1 次。达到上限写入 `gave_up`，并在失败收件箱保留记录，可 `/retry` 手动重试。
+- **失败记录**：同时写入 `forwarder_data/forwarder.db`，包含分类、尝试次数、推送消息 ID，重启后仍可在 `/failures` 查看。
+
 
 ### 手动重置
 
@@ -717,7 +781,7 @@ rm -rf forwarder_data/browser_profile
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `DOUYIN_MAIN_ACCOUNT` | 空 | **单会话**：只监测一个大号（昵称包含匹配）；**匹配到的会话会被严格锁定**——只解析这些会话内的新转发，其他会话/群聊的分享会被忽略 |
-| `DOUYIN_MAIN_ACCOUNTS` | 空 | **多会话**：同时监测多个用户/大号，昵称用逗号分隔（如 `小明,小红`）；设置后优先于 `DOUYIN_MAIN_ACCOUNT`。两者都留空则自动选「有未读角标/第一条」会话。**也可以不改这里**——运行中直接往控制台写昵称即可（见「远程控制台」） |
+| `DOUYIN_MAIN_ACCOUNTS` | 空 | **多会话**：同时监测多个用户/大号，昵称用逗号分隔（如 `小明,小红`）；设置后优先于 `DOUYIN_MAIN_ACCOUNT`。两者都留空则自动选「有未读角标/第一条」会话。**也可以不改这里**——运行中直接往控制台写昵称即可（见「文件控制台」） |
 | `DOUYIN_POLL_INTERVAL` | `20` | 私信轮询间隔（秒）；`reload` 模式使用 |
 | `DOUYIN_DETECT_MODE` | `reload` | 检测模式：`reload`（现状，整页刷新）/ `probe`（B 方案，省资源）；运行中可用控制台 `mode` 免重启切换 |
 | `FORWARDER_LIVE_PHOTO_MODE` | `video` | 实况图模式：`video`（只发视频）/ `live`（只发实况图）/ `both`（两者都发）/ `comment`（频道发视频，实况图发评论区）；超限自动改发视频 |
@@ -729,6 +793,12 @@ rm -rf forwarder_data/browser_profile
 | `FORWARDER_SKIP_MEDIA_PROCESSING` | `true` | 跳过原项目的媒体处理（转码等），归档原始文件；设 `false` 需装 ffmpeg |
 | `TG_PUSH` | `false` | 是否推送解析结果到 Telegram 群组/频道（见下文专节） |
 | `TG_TARGET_CHAT` | 空 | 推送目标：`@用户名`／`-100...` 数字 ID／t.me 链接 |
+| `FORWARDER_BOT_CONSOLE` | `true` | 启用 Telegram bot 控制台（私聊运维） |
+| `FORWARDER_BOT_BIND_CODE` | 空 | owner 一次性绑定码；为空不能绑定 |
+| `FORWARDER_FAILURE_NOTIFY` | `true` | 失败达到上限时私聊 owner |
+| `FORWARDER_CONTENT_HASH` | `true` | 按最大媒体文件 SHA-256 内容去重 |
+| `FORWARDER_MIN_FREE_GB` | `3.0` | 磁盘可用空间低于该值暂停解析；`0` = 关闭 |
+| `FORWARDER_SUMMARY_ENABLED` | `true` | 每日摘要（周一发周报） |
 | `FORWARDER_SAVE_METADATA` | `true` | 归档目录写入 `metadata.json` |
 | `FORWARDER_AUTO_SYNC_COOKIE` | `false` | 每次启动（小号登录后）自动把小号 cookie 同步到解析端（手动同步一次：`python run.py export-cookie`） |
 | `FORWARDER_CLEANUP_AFTER_PUSH` | `true` | 推送成功后删除本地归档目录 |
@@ -740,7 +810,7 @@ rm -rf forwarder_data/browser_profile
 
 ### 完整配置参考
 
-> 优先级：控制台设置（`state.json`）> `.env` > 代码默认值。修改 `.env` 后需重启服务；控制台命令下一轮生效。
+> 优先级：仅监测账号 / 检测模式 / 实况图模式支持运行中覆盖（`state.json` > `.env` > 默认）；其他配置只读 `.env`。修改 `.env` 后需重启服务；控制台覆盖项下一轮生效。
 
 #### 监测账号
 
@@ -799,6 +869,40 @@ rm -rf forwarder_data/browser_profile
 | `API_ID` / `API_HASH` | 空 | my.telegram.org 创建应用获得 |
 | `BOT_TOKEN` | 空 | @BotFather 创建机器人获得 |
 | `BOT_PROXY` | 空 | 国内服务器代理，如 `http://127.0.0.1:7890` |
+
+#### Bot 控制台 / Owner（可选）
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `FORWARDER_BOT_CONSOLE` | `true` | 启用私聊控制台 |
+| `FORWARDER_BOT_BIND_CODE` | 空 | 一次性绑定码；建议 64 位随机十六进制 |
+| `FORWARDER_BIND_CODE_TTL` | `900` | 绑定码有效期（秒，从服务启动计时）；`0` = 不过期 |
+| `FORWARDER_FAILURE_NOTIFY` | `true` | 失败达到上限时通知 owner |
+| `FORWARDER_PARSE_IN_GROUP` | `true` | 允许 owner 在关联讨论组发链接解析 |
+
+#### 失败重试 / 磁盘保护
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `FORWARDER_MAX_PARSE_ATTEMPTS` | `3` | 临时错误最多重试次数；永久错误固定 1 次 |
+| `FORWARDER_RETRY_BACKOFF_BASE` | `60` | 首次退避秒数，之后翻倍 |
+| `FORWARDER_RETRY_BACKOFF_MAX` | `1800` | 单次退避上限（秒） |
+| `FORWARDER_MIN_FREE_GB` | `3.0` | 输出目录可用空间低于该值暂停解析；`0` = 关闭 |
+
+#### 监控 / 摘要 / 看门狗 / 去重
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `FORWARDER_HEALTHCHECK_URL` | 空 | 外部心跳 URL（healthchecks.io / Uptime Kuma） |
+| `FORWARDER_HEALTHCHECK_INTERVAL` | `300` | 心跳间隔（秒） |
+| `FORWARDER_HEALTHCHECK_METHOD` | `GET` | 心跳请求方法 |
+| `FORWARDER_SILENT_ALERT_MINUTES` | `360` | 长时间无新候选提醒 owner；`0` = 关闭 |
+| `FORWARDER_SUMMARY_ENABLED` | `true` | 每日摘要开关（周一发周报） |
+| `FORWARDER_SUMMARY_HOUR` | `22` | 摘要触发小时（本地 0-23） |
+| `FORWARDER_BROWSER_CHECK_INTERVAL` | `300` | 看门狗检查间隔（秒） |
+| `FORWARDER_BROWSER_MAX_RSS_MB` | `1800` | Chromium 内存超限重启；`0` = 不按内存 |
+| `FORWARDER_BROWSER_RESTART_INTERVAL` | `86400` | 定时重启间隔；仅队列空闲且 30 分钟无新候选时执行 |
+| `FORWARDER_CONTENT_HASH` | `true` | 按最大媒体文件 SHA-256 内容去重 |
 
 #### 登录预览 / 调试
 
@@ -874,7 +978,7 @@ journalctl -u douyin-forward -f
 **说明**：
 
 - 推送内容与原项目输出一致（视频带封面、流式播放 + 标题/来源文案；图文走相册；失败自动降级为文档）；
-- 推送失败会自动重试（与解析共用重试机制，最多 3 次），只影响推送，本地归档不受影响；
+- 推送失败按类型重试（Telegram 最多 3 次，指数退避），达到上限进入失败收件箱；只影响推送，本地归档不受影响；
 - 服务器需要能访问 Telegram：海外服务器一般直连可用；**国内服务器请配置 `BOT_PROXY`**（如 `BOT_PROXY=http://127.0.0.1:7890`）。
 
 ---
@@ -893,7 +997,7 @@ sudo APP_USER=douyin bash deploy/install_ubuntu.sh
 ```
 
 脚本会自动完成：系统依赖 → 虚拟环境 `.venv` → Playwright Chromium → systemd 服务安装
-（模板：`deploy/douyin-forward.service`），并在结束时打印「首次登录 + 启动服务」的具体命令。
+（模板：`deploy/douyin-forward.service`）；还会交互式配置检测模式、实况图模式、Bot 控制台/绑定码，并在结束时打印「首次登录 + 启动服务」的具体命令。也可单独运行 `sudo bash deploy/configure_bot_console.sh` 生成绑定码。
 
 > ⚠️ 关键提醒：**首次登录必须在服务器本机完成**（登录态不能跨机器复制——浏览器 Cookie 按系统加密，复制后会静默失效）：
 > 服务器上用 `xvfb-run -a` 以 `DOUYIN_HEADLESS=false` 扫码，二维码自动截图到 `forwarder_data/login_qr.png`。
@@ -1008,7 +1112,7 @@ sudo systemctl start douyin-forward
 
 | 模块 | 职责 |
 | --- | --- |
-| [forwarder/douyin_web.py](forwarder/douyin_web.py) | 浏览器生命周期、登录、检测（reload/probe）、消息提取、远程控制台 |
+| [forwarder/douyin_web.py](forwarder/douyin_web.py) | 浏览器生命周期、登录、检测（reload/probe）、消息提取、文件控制台 |
 | [forwarder/parser_bridge.py](forwarder/parser_bridge.py) | 调用原项目 `ParseService` / `ParsePipeline`，在临时目录清理前完成归档 |
 | [forwarder/archive.py](forwarder/archive.py) | 复制媒体、生成 `metadata.json`、实况图视频归档 |
 | [forwarder/state.py](forwarder/state.py) | 去重/水位/失败计数/控制台设置 |
@@ -1056,7 +1160,7 @@ bash -n deploy/*.sh
 
 **Q2. 收不到消息 / 日志提示「未找到私信会话」？**
 - 确认大号已经给小号发过至少一条消息；
-- 确认监测昵称与大号昵称匹配（包含匹配）——**无需改 .env**，直接往 `forwarder_data/agent_cmd.txt` 写入大号昵称即可更换（见「远程控制台」）；
+- 确认监测昵称与大号昵称匹配（包含匹配）——**无需改 .env**，直接往 `forwarder_data/agent_cmd.txt` 写入大号昵称即可更换（见「文件控制台」）；
 - 大号与小号互相添加关注、把消息从「陌生人消息」里移出；
 - 开启 `FORWARDER_DUMP_HTML=true`，查看 `forwarder_data/debug/` 里转储的页面 HTML，并按需调整 `forwarder/douyin_web.py` 顶部的选择器常量。
 
@@ -1103,8 +1207,8 @@ Telegram 在境内不可直连。搭好代理后（如本机 7890 端口），�
 `检测到重复，已跳过: 作品已在库（视频 ID ...）`，不会重复解析/下载。**本地缓存被自动清理后依然有效**（记录保存在 `state.json`）。
 
 **Q13. 监控的昵称/登录操作不想每次改 .env、也不想到服务器上敲长命令？**
-用「远程控制台 + 登录编号菜单」：写一句话/一个数字到 `forwarder_data/agent_cmd.txt` 即可
-（如 `echo 1 > ...` 点击发送短信验证码、`echo 我的大号 > ...` 换监测对象），详见「远程控制台」专节。
+用「文件控制台 + 登录编号菜单」：写一句话/一个数字到 `forwarder_data/agent_cmd.txt` 即可
+（如 `echo 1 > ...` 点击发送短信验证码、`echo 我的大号 > ...` 换监测对象），详见「文件控制台」专节。
 
 **Q14. 服务器磁盘会不会被占满？**
 不会无限增长：默认「推送成功即删本地归档」+「超过 72 小时的缓存定时清理」（见「本地缓存清理」）。
@@ -1184,7 +1288,7 @@ Telegram Bot API 的 `sendMediaGroup` 不支持 Live Photo，只能逐条 `sendL
 - **大文件上传**：`forwarder/fast_aes.py` 在启动时把 Pyrogram 的 AES-IGE 换成 cryptography/pycryptodome 的 C 后端（优先 tgcrypto），避免 pyaes 纯 Python 加密拖慢 49MB 级视频；协议与分片不变。
 - **评论区模式（comment）**：频道先发普通视频/视频相册（`LivePhotoFile` 以视频形式入相册），再借助讨论组自动转发消息建立「频道帖 → 评论根」映射，逐条 `SendMedia + InputReplyToMessage` 发 Live Photo；bot 不能调用 `messages.GetDiscussionMessage`，评论根等待默认 10 秒。
 - **Telegram Live Photo 限制**：Bot API `sendLivePhoto` 需要静态图 + 视频两个文件，视频 ≤10s/≤10MB；`sendMediaGroup` 不支持 Live Photo，因此多图只能逐条发送。
-- **状态与恢复**：`state.json` 区分 `seen_messages`（已识别）与 `settled`（已有定论），配合 `_inflight` 实现重启后补处理；`failures` 最多重试 3 次后进入 `gave_up`。
+- **状态与恢复**：`state.json` 区分 `seen_messages`（已识别）与 `settled`（已有定论），配合 `_inflight` 实现重启后补处理；失败按类别退避重试（临时错误 3–5 次，地区版权/审核/私密等永久错误 1 次），达到上限进入 `gave_up` / 失败收件箱。
 - **归档**：`archive_result` 在原项目临时目录清理前复制媒体；实况图额外复制 `source.video_path`，并在 `metadata.json` 写入 `live_photo_count`。
 
 ---
@@ -1195,6 +1299,7 @@ Telegram Bot API 的 `sendMediaGroup` 不支持 Live Photo，只能逐条 `sendL
 
 | 日期 | 内容 |
 | --- | --- |
+| 2026-11-14 | 新增 Bot 控制台 / owner 一次性绑定码、中文 `/help`、失败收件箱与分类重试、内容哈希去重、心跳/静默告警/每日摘要、浏览器看门狗、本地归档索引与 `/search`、服务器状态 `/status` |
 | 2026-11-14 | 新增 `comment` 模式：频道发视频/相册，Live Photo 逐条发同帖评论区；修复 Live Photo 上传失败（kurigram 2.2.26 cover 引用错误）；数量上限默认 3 → 10 |
 | 2026-10-25 | 实况图（Live Photo）三模式：`video` / `live` / `both`；超限自动改发视频；归档 jpg+mp4；控制台 `live` 命令 |
 | 2026-10-23 | 检测模式 `reload` / `probe`：probe 用 DOM 探针 + 定期取数 + 自愈，请求量约降 95% |

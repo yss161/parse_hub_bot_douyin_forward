@@ -153,6 +153,47 @@ class ForwarderSettings:
     # 目标：@用户名（公开频道/群）、-100 开头的数字 ID（私有）、或 t.me 链接
     tg_target: str = field(default_factory=lambda: _env("TG_TARGET_CHAT"))
 
+    # ─────────────── Bot 控制台 / Owner 绑定 ───────────────
+    # 一次性绑定码：用户在私聊中发送 /start <code> 或 /auth <code>，第一个成功者成为 owner。
+    # 留空 = 不启用绑定/控制台（已有 owner 时仍会启动控制台）。生成：openssl rand -hex 32
+    bot_bind_code: str = field(default_factory=lambda: _env("FORWARDER_BOT_BIND_CODE"))
+    # 绑定码有效期（秒）；从服务启动开始计时，0 = 不限制。默认 15 分钟。
+    bind_code_ttl: int = field(default_factory=lambda: _env_int("FORWARDER_BIND_CODE_TTL", 900))
+    # 是否启用 bot 控制台（绑定成功后可用 /status、/retry、/parse 等）
+    bot_console: bool = field(default_factory=lambda: _env_bool("FORWARDER_BOT_CONSOLE", True))
+    # 最终失败时是否私聊 owner（需要先绑定；只发一次，避免重试刷屏）
+    failure_notify: bool = field(default_factory=lambda: _env_bool("FORWARDER_FAILURE_NOTIFY", True))
+    # 允许 owner 在关联讨论组里直接发链接/使用 /parse（群默认 privacy mode 可能收不到普通消息）
+    parse_in_group: bool = field(default_factory=lambda: _env_bool("FORWARDER_PARSE_IN_GROUP", True))
+
+    # ─────────────── 失败重试策略 ───────────────
+    # 临时错误最大尝试次数（永久错误只试 1 次；分类见 forwarder/failures.py）
+    max_parse_attempts: int = field(default_factory=lambda: _env_int("FORWARDER_MAX_PARSE_ATTEMPTS", 3))
+    # 指数退避：第 1 次失败后 60s，第 2 次 120s……上限 30 分钟
+    retry_backoff_base: int = field(default_factory=lambda: _env_int("FORWARDER_RETRY_BACKOFF_BASE", 60))
+    retry_backoff_max: int = field(default_factory=lambda: _env_int("FORWARDER_RETRY_BACKOFF_MAX", 1800))
+
+    # ─────────────── 磁盘/心跳/摘要 ───────────────
+    # 输出目录所在磁盘剩余空间低于该值时暂停解析并告警；0 = 关闭
+    min_free_gb: float = field(default_factory=lambda: _env_float("FORWARDER_MIN_FREE_GB", 3.0))
+    # 外部心跳 URL（如 healthchecks.io / Uptime Kuma push URL）；留空 = 关闭
+    healthcheck_url: str = field(default_factory=lambda: _env("FORWARDER_HEALTHCHECK_URL"))
+    healthcheck_interval: int = field(default_factory=lambda: _env_int("FORWARDER_HEALTHCHECK_INTERVAL", 300))
+    healthcheck_method: str = field(default_factory=lambda: _env("FORWARDER_HEALTHCHECK_METHOD", "GET").upper())
+    # 超过该分钟数没有发现任何新候选时提醒 owner（0 = 关闭；默认 6 小时）
+    silent_alert_minutes: int = field(default_factory=lambda: _env_int("FORWARDER_SILENT_ALERT_MINUTES", 360))
+    # 每日摘要（本地时间 0-23）；关闭请用 FORWARDER_SUMMARY_ENABLED=false
+    summary_enabled: bool = field(default_factory=lambda: _env_bool("FORWARDER_SUMMARY_ENABLED", True))
+    summary_hour: int = field(default_factory=lambda: _env_int("FORWARDER_SUMMARY_HOUR", 22))
+
+    # ─────────────── 浏览器看门狗 ───────────────
+    # 检查间隔（秒）；页面无响应 / 内存超限 / 定时到期时自动重启 Chromium
+    browser_check_interval: int = field(default_factory=lambda: _env_int("FORWARDER_BROWSER_CHECK_INTERVAL", 300))
+    browser_max_rss_mb: int = field(default_factory=lambda: _env_int("FORWARDER_BROWSER_MAX_RSS_MB", 1800))
+    browser_restart_interval: int = field(default_factory=lambda: _env_int("FORWARDER_BROWSER_RESTART_INTERVAL", 86400))
+    # 内容级去重：归档后对最大媒体文件做 SHA-256，同内容换作品 ID 也不重复推送
+    content_hash: bool = field(default_factory=lambda: _env_bool("FORWARDER_CONTENT_HASH", True))
+
     # ─────────────── 登录截图链接服务（把二维码/页面截图变成可点击链接） ───────────────
     # 只读 HTTP 服务端口（0 = 关闭；仅暴露白名单里的截图/菜单文件，不含登录态）
     shot_port: int = field(default_factory=lambda: _env_int("FORWARDER_SHOT_PORT", 8765))
@@ -187,6 +228,8 @@ class ForwarderSettings:
     data_dir: Path = field(default_factory=lambda: FORWARDER_DATA_DIR)
     browser_profile_dir: Path = field(default_factory=lambda: FORWARDER_DATA_DIR / "browser_profile")
     state_file: Path = field(default_factory=lambda: FORWARDER_DATA_DIR / "state.json")
+    # 归档索引 / 失败收件箱 / 统计（SQLite；与 state.json 分开，避免状态文件持续膨胀）
+    db_file: Path = field(default_factory=lambda: FORWARDER_DATA_DIR / "forwarder.db")
     qr_image_path: Path = field(default_factory=lambda: FORWARDER_DATA_DIR / "login_qr.png")
     debug_dir: Path = field(default_factory=lambda: FORWARDER_DATA_DIR / "debug")
 
@@ -240,7 +283,16 @@ class ForwarderSettings:
             f"  解析最小间隔     : {self.parse_min_interval}s",
             f"  输出目录         : {self.output_dir}",
             f"  跳过媒体处理     : {self.skip_media_processing}",
-            f"  TG 推送          : {('已启用 → ' + self.tg_target) if self.tg_push else '未启用'}",
+            f"  TG 推送          : {('已启用 → ' + self.tg_target) if self.tg_push and self.tg_target else '未启用'}",
+            f"  Bot 控制台       : {'已启用' if self.bot_console else '未启用'}"
+            + (f"（绑定码有效期 {self.bind_code_ttl}s）" if self.bot_bind_code else "（未配置绑定码；已有 owner 仍可用）"),
+            f"  失败通知         : {'已启用' if self.failure_notify else '未启用'}（需先绑定 owner）",
+            f"  重试策略         : 最多 {self.max_parse_attempts} 次；退避 {self.retry_backoff_base}s → {self.retry_backoff_max}s",
+            f"  磁盘水位         : {self.min_free_gb:g} GB（低于则暂停解析）" if self.min_free_gb > 0 else "  磁盘水位         : 关闭",
+            f"  心跳/静默告警    : {self.healthcheck_url or '未配置'} / {self.silent_alert_minutes}min",
+            f"  每日摘要         : {'%02d:00' % self.summary_hour if self.summary_enabled and self.summary_hour >= 0 else '关闭'}",
+            f"  浏览器看门狗     : 每 {self.browser_check_interval}s；无响应 / RSS>{self.browser_max_rss_mb}MB / 运行 {self.browser_restart_interval}s 且空闲时重启",
+            f"  内容级去重       : {'已启用' if self.content_hash else '关闭'}",
             f"  解析 cookie 自动同步: {self.auto_sync_cookie}（启动时把小号 cookie 同步到解析端）",
             f"  推送后清缓存     : {self.cleanup_after_push}（仅推送成功时执行）",
             f"  缓存保留时长     : {self.cache_ttl_hours}h（0 = 关闭定时清理）",

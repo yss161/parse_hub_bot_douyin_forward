@@ -25,18 +25,21 @@ from typing import Any
 
 from log import logger
 
+from . import sysinfo
 from .config import ForwarderSettings, split_accounts
+from .control import ControlPlane
 from .cookie_config import apply_cookies, clear_cookies, current_cookies, export_from_browser, mask_cookie
 from .douyin_web import DouyinWebReceiver
-from .parser_bridge import parse_url
+from .failures import classify_failure, short_error
+from .jobs import ParseJob
+from .parser_bridge import ParseOutcome, parse_url
 from .reporter import LogStatusReporter
+from .runtime import RuntimeStats
 from .state import StateStore, fingerprint, video_id_from_url
+from .store import Store
 from .tg_push import TgPusher
 
 logger = logger.bind(name="Forwarder/Main")
-
-# 同一链接最多重试次数，超过后放弃并记录
-MAX_PARSE_ATTEMPTS = 3
 
 # 定时缓存清理的执行间隔（秒）；实际保留时长由 FORWARDER_CACHE_TTL_HOURS 决定
 CACHE_SWEEP_INTERVAL = 3600
@@ -121,6 +124,8 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
     logger.info("=" * 64)
 
     state = StateStore(settings.state_file)
+    store = Store(settings.db_file)
+    runtime = RuntimeStats()
     receiver = DouyinWebReceiver(settings, state)
     logger.info(
         f"检测模式: {receiver.effective_detect_mode}"
@@ -137,6 +142,7 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
         )
     reporter = LogStatusReporter("Pipeline")
     pusher = TgPusher(settings, state)
+    control = ControlPlane(settings, state, store, pusher, runtime, receiver)
     _live_mode = pusher.effective_live_photo_mode
     logger.info(
         f"实况图模式: {_live_mode}"
@@ -163,14 +169,406 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
             f"（.env 默认: {settings.main_account or '未设置'}；控制台输入 reset 可恢复默认）"
         )
 
-    # 启动时先做一次缓存清理（清掉上次运行留下的过期内容）
     if settings.cache_ttl_hours > 0:
         sweep_cache(settings)
 
+    queue: asyncio.Queue[ParseJob] = asyncio.Queue()
+    wake = asyncio.Event()
+    pending: set[str] = set()
+    last_parse_ts = 0.0
+    last_sweep = time.monotonic()
+    last_heartbeat = 0.0
+
+    def enqueue(job: ParseJob) -> bool:
+        fp = fingerprint(job.url)
+        if fp in pending:
+            return False
+        pending.add(fp)
+        queue.put_nowait(job)
+        runtime.queue_size = queue.qsize()
+        wake.set()
+        return True
+
+    def wake_up() -> None:
+        wake.set()
+
+    control.set_job_sink(enqueue, wake_up)
+
+    async def reply_job(job: ParseJob, text: str) -> None:
+        if not job.reply_chat_id:
+            return
+        await control.send_to(
+            job.reply_chat_id,
+            text,
+            reply_to_message_id=job.reply_to_message_id,
+        )
+
+    def settle_message(job: ParseJob) -> None:
+        if job.msg_fp:
+            state.mark_settled(job.msg_fp)
+            receiver.mark_inflight_done(job.msg_fp)
+
+    async def ensure_disk() -> bool:
+        """磁盘低于阈值时停在这里等待，避免把磁盘写满。"""
+        if settings.min_free_gb <= 0:
+            return True
+        warned = False
+        while True:
+            free = sysinfo.free_gb(settings.output_dir)
+            if free is None or free >= settings.min_free_gb:
+                return True
+            if not warned:
+                store.bump_stat("low_disk")
+                await control.alert_low_disk(free)
+                warned = True
+            await asyncio.sleep(60)
+
+    async def process_job(job: ParseJob) -> None:
+        nonlocal last_parse_ts
+        fp = fingerprint(job.url)
+        if state.is_processed(fp) or state.is_gave_up(fp):
+            if job.failure_id and state.is_processed(fp):
+                store.set_failure_status(job.failure_id, "resolved")
+            settle_message(job)
+            return
+
+        vid = video_id_from_url(job.url)
+        if vid and state.is_video_processed(vid):
+            state.clear_failures(fp)
+            if job.failure_id:
+                store.set_failure_status(job.failure_id, "resolved")
+            settle_message(job)
+            return
+
+        await ensure_disk()
+        wait = settings.parse_min_interval - (time.monotonic() - last_parse_ts)
+        if wait > 0:
+            await asyncio.sleep(wait)
+
+        if job.retry:
+            store.bump_stat("retry")
+            if job.failure_id:
+                store.set_failure_status(job.failure_id, "retrying")
+
+        runtime.parse_inflight += 1
+        push_result: Any = None
+
+        async def push_cb(result: Any) -> bool:
+            nonlocal push_result
+            push_result = await pusher.push(result.parse_result, result.processed_list)
+            return bool(getattr(push_result, "ok", False))
+
+        logger.info(f"开始解析（来源: {job.source}）: {job.url}")
+        try:
+            outcome = await parse_url(
+                job.url,
+                output_dir=settings.output_dir,
+                save_metadata=settings.save_metadata,
+                skip_media_processing=settings.skip_media_processing,
+                reporter=reporter,
+                on_files_ready=push_cb if pusher.enabled else None,
+                is_duplicate=(
+                    (lambda h: state.is_content_processed(h) or store.archive_by_hash(h) is not None)
+                    if settings.content_hash
+                    else None
+                ),
+            )
+        except Exception as e:
+            logger.exception(f"解析过程异常: {job.url} —— {e}")
+            outcome = ParseOutcome(
+                url=job.url,
+                raw_url=job.url,
+                ok=False,
+                error=f"解析过程异常: {e}",
+            )
+        finally:
+            last_parse_ts = time.monotonic()
+            runtime.parse_inflight = max(0, runtime.parse_inflight - 1)
+
+        archive = outcome.archive
+        push_failed = bool(outcome.ok and pusher.enabled and outcome.push_ok is False)
+
+        # 内容级重复：归档目录已经建好，但内容此前推过。删掉新副本，不重复推送。
+        if outcome.ok and outcome.duplicate:
+            if archive is not None:
+                _remove_cache_dir(settings.output_dir, archive.dir)
+            state.mark_processed(fp, job.url, str(archive.dir) if archive else None)
+            if outcome.raw_url and outcome.raw_url != job.url:
+                state.mark_processed(fingerprint(outcome.raw_url), outcome.raw_url, str(archive.dir) if archive else None)
+            for video_url in {outcome.raw_url or job.url, job.url}:
+                v = video_id_from_url(video_url)
+                if v:
+                    state.mark_video_processed(v, video_url, str(archive.dir) if archive else None)
+            state.clear_failures(fp)
+            store.resolve_failures(fp)
+            if job.failure_id:
+                store.set_failure_status(job.failure_id, "resolved")
+            settle_message(job)
+            store.bump_stat("duplicate")
+            runtime.last_success_at = time.time()
+            logger.info(f"检测到重复内容（文件哈希已存在），跳过推送: {job.url}")
+            await reply_job(job, f"♻️ 内容与已归档作品重复，已跳过：\n{job.url}")
+            state.save()
+            return
+
+        if outcome.ok and not push_failed:
+            archive_dir = str(archive.dir) if archive else ""
+            state.mark_processed(fp, job.url, archive_dir)
+            if outcome.raw_url and outcome.raw_url != job.url:
+                state.mark_processed(fingerprint(outcome.raw_url), outcome.raw_url, archive_dir)
+            for video_url in {outcome.raw_url or job.url, job.url}:
+                v = video_id_from_url(video_url)
+                if v:
+                    state.mark_video_processed(v, video_url, archive_dir)
+            if settings.content_hash and archive is not None and archive.content_hash:
+                state.mark_content_processed(archive.content_hash, job.url, archive_dir)
+            state.clear_failures(fp)
+            store.resolve_failures(fp)
+            if job.failure_id:
+                store.set_failure_status(job.failure_id, "resolved")
+            settle_message(job)
+
+            archive_id = 0
+            if archive is not None:
+                archive_id = store.record_archive(
+                    video_id=archive.video_id,
+                    content_hash=archive.content_hash,
+                    title=archive.title,
+                    author=archive.author,
+                    source_url=job.url,
+                    raw_url=outcome.raw_url,
+                    output_dir=archive_dir,
+                    size=archive.size,
+                    file_count=len(archive.files),
+                    live_count=archive.live_count,
+                    tg_chat_id=getattr(push_result, "chat_id", None),
+                    tg_message_id=getattr(push_result, "message_id", None),
+                    tg_link=getattr(push_result, "link", "") or "",
+                )
+            store.bump_stat("success")
+            if outcome.push_ok:
+                store.bump_stat("push_ok")
+            runtime.last_success_at = time.time()
+            if outcome.push_ok:
+                runtime.last_push_at = time.time()
+            logger.success(
+                f"解析完成 ✅ 已归档: {archive_dir or '-'} "
+                f"（{len(archive.files) if archive else 0} 个文件，DB #{archive_id}）"
+                + ("，已推送至 Telegram" if outcome.push_ok else "")
+            )
+            if archive is not None and settings.cleanup_after_push and outcome.push_ok:
+                if _remove_cache_dir(settings.output_dir, archive.dir):
+                    logger.info(f"🧹 推送成功，已删除本地缓存: {archive.dir.name}")
+            link = getattr(push_result, "link", "") if push_result else ""
+            await reply_job(
+                job,
+                f"✅ 解析完成\n{(outcome.title or '')[:120]}\n"
+                f"{outcome.raw_url or job.url}\n"
+                + (f"频道消息：{link}" if link else ""),
+            )
+            state.save()
+            return
+
+        # 失败：解析失败，或解析成功但推送失败
+        error = (
+            "Telegram 推送失败（已归档，稍后重试）"
+            if push_failed
+            else (outcome.error or "未知错误")
+        )
+        if push_failed:
+            store.bump_stat("push_fail")
+        kind = classify_failure(error)
+        limit = 1 if kind.permanent else max(1, min(int(kind.max_attempts), int(settings.max_parse_attempts) or 3))
+        attempts = state.record_failure(
+            fp,
+            error,
+            category=kind.code,
+            url=job.url,
+            max_attempts=limit,
+            backoff_base=settings.retry_backoff_base,
+            backoff_max=settings.retry_backoff_max,
+        )
+        rec = store.record_failure(
+            fp=fp,
+            url=job.url,
+            raw_url=outcome.raw_url or "",
+            error=error,
+            category=kind.code,
+            attempts=attempts,
+        )
+        job.failure_id = int(rec.get("id") or 0) or job.failure_id
+        runtime.last_failure_at = time.time()
+        runtime.last_error = short_error(error, 300)
+
+        if attempts >= limit:
+            state.mark_gave_up(fp, job.url, error, category=kind.code)
+            settle_message(job)
+            if job.failure_id:
+                store.set_failure_status(job.failure_id, "gave_up")
+            store.bump_stat("failure")
+            logger.error(f"已失败 {attempts} 次，放弃: {job.url} —— {error}")
+            if job.failure_id:
+                await control.notify_failure(rec)
+            await reply_job(
+                job,
+                f"❌ 解析失败（{kind.label}，已放弃）\n{job.url}\n{short_error(error, 200)}",
+            )
+        else:
+            # 临时候选失败：释放消息 inflight，退避期由 state.failure_due 控制，
+            # 到期后 due_failures / 原消息都会重新触发，不会永久卡住。
+            if job.msg_fp:
+                receiver.mark_inflight_done(job.msg_fp)
+            info = state.get_failure(fp)
+            remain = max(0, int(info.get("retry_at", 0) or 0) - int(time.time()))
+            logger.warning(
+                f"处理失败（第 {attempts}/{limit} 次，约 {remain}s 后自动重试）: "
+                f"{job.url} —— {error}"
+            )
+            await reply_job(
+                job,
+                f"⚠️ 解析失败（第 {attempts}/{limit} 次），约 {remain}s 后自动重试。\n"
+                f"{job.url}\n{short_error(error, 200)}",
+            )
+        state.save()
+
+    async def worker() -> None:
+        while True:
+            job = await queue.get()
+            fp = fingerprint(job.url)
+            runtime.queue_size = queue.qsize()
+            try:
+                await process_job(job)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.exception(f"解析任务异常: {job.url} —— {e}")
+                runtime.last_error = short_error(str(e), 300)
+                # 未走正常失败分支（例如 DB/控制台异常）时也要释放消息 inflight，
+                # 否则该消息在本进程内会永久卡住。
+                if job.msg_fp:
+                    receiver.mark_inflight_done(job.msg_fp)
+            finally:
+                pending.discard(fp)
+                runtime.queue_size = queue.qsize()
+                queue.task_done()
+
+    async def poll_cycle() -> None:
+        nonlocal last_sweep
+        if state.get_flag("paused"):
+            return
+        if settings.min_free_gb > 0:
+            free = sysinfo.free_gb(settings.output_dir)
+            if free is not None and free < settings.min_free_gb:
+                await control.alert_low_disk(free)
+                return
+        try:
+            candidates = await receiver.poll_once()
+            runtime.consecutive_poll_errors = 0
+        except Exception as e:
+            runtime.consecutive_poll_errors += 1
+            runtime.last_error = short_error(str(e), 300)
+            logger.exception(f"轮询异常（本轮跳过）: {e}")
+            candidates = []
+        runtime.last_poll_at = time.time()
+        runtime.last_poll_candidates = len(candidates)
+        runtime.consecutive_empty = 0 if candidates else runtime.consecutive_empty + 1
+        if candidates:
+            runtime.last_candidate_at = time.time()
+        for cand in candidates:
+            fp = fingerprint(cand.url)
+            if state.is_processed(fp) or state.is_gave_up(fp):
+                logger.debug(f"已处理/已放弃，跳过: {cand.url}")
+                state.mark_settled(cand.msg_fp)
+                receiver.mark_inflight_done(cand.msg_fp)
+                continue
+            vid = video_id_from_url(cand.url)
+            if vid and state.is_video_processed(vid):
+                logger.info(f"检测到重复作品（视频 ID {vid} 已处理过），跳过: {cand.url}")
+                state.mark_settled(cand.msg_fp)
+                receiver.mark_inflight_done(cand.msg_fp)
+                continue
+            if not state.failure_due(fp):
+                # 退避期内不要占着消息的 inflight 标记，否则到期后也无法重新提取
+                receiver.mark_inflight_done(cand.msg_fp)
+                continue
+            if fp in pending:
+                # 已有同链接任务在队列/解析中：释放本条消息的 inflight，
+                # 等该任务结束后由下一轮轮询补一次 settle。
+                receiver.mark_inflight_done(cand.msg_fp)
+                continue
+            job = ParseJob(url=cand.url, source=cand.source, msg_fp=cand.msg_fp)
+            if enqueue(job):
+                runtime.last_candidate_at = time.time()
+                logger.info(f"已加入解析队列（来源: {cand.source}）: {cand.url}")
+            else:
+                receiver.mark_inflight_done(cand.msg_fp)
+
+        # 已到退避时间的失败自动重新入队（手动 /retry 不受退避限制）
+        for fp, url, _count in state.due_failures(10):
+            if not url or fp in pending:
+                continue
+            if state.is_processed(fp) or state.is_gave_up(fp):
+                continue
+            vid = video_id_from_url(url)
+            if vid and state.is_video_processed(vid):
+                state.clear_failures(fp)
+                continue
+            enqueue(ParseJob(url=url, source="retry", retry=True))
+
+        now = time.monotonic()
+        if settings.cache_ttl_hours > 0 and now - last_sweep >= CACHE_SWEEP_INTERVAL:
+            last_sweep = now
+            try:
+                sweep_cache(settings)
+            except Exception as e:
+                logger.debug(f"缓存清理异常（忽略）: {e}")
+
+    async def maintenance() -> None:
+        nonlocal last_heartbeat
+        now = time.monotonic()
+        if settings.healthcheck_url and now - last_heartbeat >= max(30, settings.healthcheck_interval):
+            last_heartbeat = now
+            await control.heartbeat()
+        await control.maybe_alert_silent()
+        await control.maybe_send_summary()
+
+    async def watchdog() -> None:
+        while True:
+            await asyncio.sleep(max(30, settings.browser_check_interval))
+            if state.get_flag("paused"):
+                continue
+            try:
+                rss = sysinfo.chrome_rss_mb()
+                age = time.time() - float(receiver._browser_started_at or 0)
+                reason = ""
+                if not await receiver.check_healthy():
+                    reason = "页面无响应"
+                elif settings.browser_max_rss_mb > 0 and rss and rss > settings.browser_max_rss_mb:
+                    reason = f"Chromium 内存 {rss:.0f}MB 超限"
+                elif settings.browser_restart_interval > 0 and age > settings.browser_restart_interval:
+                    idle_for = time.time() - max(runtime.last_candidate_at, runtime.started_at)
+                    if runtime.queue_size == 0 and idle_for >= 1800:
+                        reason = f"浏览器已运行 {age / 3600:.1f}h（空闲 {idle_for / 60:.0f} 分钟）"
+                if reason:
+                    await receiver.restart_browser(reason)
+                    runtime.browser_restarts += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning(f"浏览器看门狗异常（忽略）: {e}")
+
     await receiver.start()
-    if settings.tg_push:
+    try:
         await pusher.start()
-    # 可选：每次启动（小号登录成功后）自动把小号 cookie 同步到解析端（解决手动 cookie 过期问题）
+    except Exception as e:
+        if settings.tg_push:
+            raise
+        logger.warning(f"Telegram 客户端启动失败（控制台/通知不可用）: {e}")
+    if control.console_enabled and pusher.client_ready and pusher.client:
+        try:
+            control.register(pusher.client)
+        except Exception as e:
+            logger.warning(f"Bot 控制台注册失败（忽略）: {e}")
     if settings.auto_sync_cookie:
         try:
             cookie = await export_from_browser(receiver)
@@ -181,129 +579,45 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
                 logger.warning("自动同步解析 cookie 失败：未从小号浏览器获取到 cookie")
         except Exception as e:
             logger.warning(f"自动同步解析 cookie 异常（忽略，不影响运行）: {e}")
-    if once:
-        logger.info("启动完成（--once：只执行一轮轮询）")
 
-    last_parse_ts = 0.0
-    last_sweep = time.monotonic()
+    worker_task = asyncio.create_task(worker(), name="parse-worker")
+    watchdog_task = asyncio.create_task(watchdog(), name="browser-watchdog")
+    logger.info(
+        f"解析队列已启动；Owner 控制台: {'已启用' if control.console_enabled else '未启用'}"
+        f"；失败通知: {'开' if settings.failure_notify else '关'}"
+    )
+    if once:
+        logger.info("启动完成（--once：只执行一轮轮询并处理队列）")
+
     try:
         while True:
-            cycle_start = time.monotonic()
-            try:
-                candidates = await receiver.poll_once()
-            except Exception as e:
-                logger.exception(f"轮询异常（本轮跳过）: {e}")
-                candidates = []
-
-            for cand in candidates:
-                fp = fingerprint(cand.url)
-                if state.is_processed(fp) or state.is_gave_up(fp):
-                    logger.debug(f"已处理/已放弃，跳过: {cand.url}")
-                    state.mark_settled(cand.msg_fp)
-                    receiver.mark_inflight_done(cand.msg_fp)
-                    continue
-
-                # 作品级重复检测：同一视频换链接/换消息重复转发时也跳过
-                vid = video_id_from_url(cand.url)
-                if vid and state.is_video_processed(vid):
-                    logger.info(f"检测到重复作品（视频 ID {vid} 已处理过），跳过: {cand.url}")
-                    state.mark_settled(cand.msg_fp)
-                    receiver.mark_inflight_done(cand.msg_fp)
-                    continue
-
-                # 与上一次解析保持最小间隔，避免请求过于频繁
-                wait = settings.parse_min_interval - (time.monotonic() - last_parse_ts)
-                if wait > 0:
-                    await asyncio.sleep(wait)
-
-                async def push_cb(result: Any) -> bool:
-                    return await pusher.push(result.parse_result, result.processed_list)
-
-                logger.info(f"开始解析（来源: {cand.source}）: {cand.url}")
-                outcome = await parse_url(
-                    cand.url,
-                    output_dir=settings.output_dir,
-                    save_metadata=settings.save_metadata,
-                    skip_media_processing=settings.skip_media_processing,
-                    reporter=reporter,
-                    on_files_ready=push_cb if pusher.enabled else None,
-                )
-                last_parse_ts = time.monotonic()
-
-                push_failed = outcome.ok and outcome.push_ok is False
-                if outcome.ok and outcome.archive is not None and not push_failed:
-                    state.mark_processed(fp, cand.url, str(outcome.archive.dir))
-                    if outcome.raw_url and outcome.raw_url != cand.url:
-                        state.mark_processed(
-                            fingerprint(outcome.raw_url), outcome.raw_url, str(outcome.archive.dir)
-                        )
-                    # 作品级去重记录（含展开后链接里的视频 ID）
-                    for video_url in {outcome.raw_url or cand.url, cand.url}:
-                        video_id = video_id_from_url(video_url)
-                        if video_id:
-                            state.mark_video_processed(video_id, video_url, str(outcome.archive.dir))
-                    state.clear_failures(fp)
-                    state.mark_settled(cand.msg_fp)
-                    receiver.mark_inflight_done(cand.msg_fp)
-                    logger.success(
-                        f"解析完成 ✅ 已归档: {outcome.archive.dir} "
-                        f"（{len(outcome.archive.files)} 个文件）"
-                        + ("，已推送至 Telegram" if outcome.push_ok else "")
-                    )
-                    # 推送成功 → 按配置删除本地缓存（媒体已在 Telegram，无需保留副本）
-                    if settings.cleanup_after_push and outcome.push_ok:
-                        if _remove_cache_dir(settings.output_dir, outcome.archive.dir):
-                            logger.info(f"🧹 推送成功，已删除本地缓存: {outcome.archive.dir.name}")
-                else:
-                    error = (
-                        "解析与归档成功，但 Telegram 推送失败（下一轮自动重试）"
-                        if push_failed
-                        else (outcome.error or "未知错误")
-                    )
-                    attempts = state.record_failure(fp, error)
-                    if attempts >= MAX_PARSE_ATTEMPTS:
-                        state.mark_gave_up(fp, cand.url, error)
-                        state.mark_settled(cand.msg_fp)
-                        receiver.mark_inflight_done(cand.msg_fp)
-                        logger.error(f"已失败 {attempts} 次，放弃: {cand.url} —— {error}")
-                    else:
-                        # 撤销消息的"已识别"标记，下一轮重新提取并重试
-                        state.unmark_seen_message(cand.msg_fp)
-                        receiver.mark_inflight_done(cand.msg_fp)
-                        logger.warning(
-                            f"处理失败（第 {attempts}/{MAX_PARSE_ATTEMPTS} 次，稍后自动重试）: "
-                            f"{cand.url} —— {error}"
-                        )
-
-                state.save()
-
+            await poll_cycle()
+            await maintenance()
             if once:
+                await queue.join()
                 logger.info("--once 模式：单轮结束，退出")
                 return
-
-            elapsed = time.monotonic() - cycle_start
             if receiver.consume_force_poll():
                 logger.info("控制台触发：立即执行下一轮检查")
                 await asyncio.sleep(1.0)
-            else:
-                wait = max(1.0, receiver.poll_interval() - elapsed)
-                logger.debug(
-                    f"本轮结束（耗时 {elapsed:.1f}s，模式 {receiver.effective_detect_mode}），"
-                    f"{wait:.0f}s 后进入下一轮"
-                )
-                await asyncio.sleep(wait)
-
-            # 定时缓存清理（默认每小时检查一次；保留时长见 FORWARDER_CACHE_TTL_HOURS）
-            now = time.monotonic()
-            if settings.cache_ttl_hours > 0 and now - last_sweep >= CACHE_SWEEP_INTERVAL:
-                last_sweep = now
-                try:
-                    sweep_cache(settings)
-                except Exception as e:
-                    logger.debug(f"缓存清理异常（忽略）: {e}")
+                continue
+            wait = max(1.0, receiver.poll_interval())
+            if runtime.last_poll_candidates:
+                wait = min(wait, 10.0)
+            try:
+                await asyncio.wait_for(wake.wait(), timeout=wait)
+            except asyncio.TimeoutError:
+                pass
+            finally:
+                wake.clear()
     finally:
+        for task in (worker_task, watchdog_task):
+            task.cancel()
+        await asyncio.gather(worker_task, watchdog_task, return_exceptions=True)
         await pusher.stop()
         await receiver.close()
+        store.close()
+        state.save()
         logger.info("服务已停止")
 
 

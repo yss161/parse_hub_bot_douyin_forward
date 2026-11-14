@@ -10,7 +10,7 @@ outline: deep
 
 | 模块 | 职责 |
 | --- | --- |
-| `forwarder/douyin_web.py` | 浏览器生命周期、登录、检测（reload/probe）、消息提取、远程控制台 |
+| `forwarder/douyin_web.py` | 浏览器生命周期、登录、检测（reload/probe）、消息提取、文件控制台 |
 | `forwarder/parser_bridge.py` | 调用原项目 `ParseService` / `ParsePipeline`，在临时目录清理前归档 |
 | `forwarder/archive.py` | 复制媒体、生成 `metadata.json`、实况图视频归档 |
 | `forwarder/state.py` | 去重/水位/失败计数/控制台设置 |

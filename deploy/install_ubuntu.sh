@@ -172,6 +172,12 @@ if ! bash "$SCRIPT_DIR/configure_live_photo.sh"; then
   warn "实况图模式配置未完成 —— 可稍后运行: bash $PROJECT_DIR/deploy/configure_live_photo.sh"
 fi
 
+# 交互式配置 Bot 控制台 / owner 绑定 / 失败通知
+# （非交互式环境自动跳过；可用 BOT_CONSOLE=on|off 预设）
+if ! bash "$SCRIPT_DIR/configure_bot_console.sh"; then
+  warn "Bot 控制台配置未完成 —— 可稍后运行: bash $PROJECT_DIR/deploy/configure_bot_console.sh"
+fi
+
 if [ "$(id -u)" -eq 0 ]; then
   chown -R "$RUN_AS:$RUN_AS" "$PROJECT_DIR"
 fi
@@ -224,6 +230,7 @@ cat <<EOF
    重配解析Cookie: sudo bash $PROJECT_DIR/deploy/configure_parser_cookie.sh  # 不填/自动/手动/文件
    重配检测模式 : sudo bash $PROJECT_DIR/deploy/configure_detect_mode.sh # reload（现状）/ probe（B 方案）
    重配实况图   : sudo bash $PROJECT_DIR/deploy/configure_live_photo.sh  # video / live / both / comment
+   配置 Bot/绑定: sudo bash $PROJECT_DIR/deploy/configure_bot_console.sh  # owner 绑定码 / 失败通知 / 摘要
    运行中切模式 : echo "mode probe" | sudo tee $PROJECT_DIR/forwarder_data/agent_cmd.txt   # 免重启
    运行中切实况 : echo "live both" | sudo tee $PROJECT_DIR/forwarder_data/agent_cmd.txt   # 免重启
    运行中换账号 : echo "新昵称" | sudo tee $PROJECT_DIR/forwarder_data/agent_cmd.txt   # 免重启即时生效

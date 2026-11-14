@@ -22,7 +22,7 @@
       · 有界面首次打开 douyin.com → 正常展示「抖音精选」页并自动弹出登录二维码 ✅
       · 无头模式首次访问 → 易触发滑块验证码（风控），需先用有界面完成一次登录
 
-交互方式（远程控制台，免记忆指令）：
+交互方式（文件控制台，免记忆指令）：
   - 登录页/验证页会自动识别页面上的可点击按钮并生成【编号菜单】输出到日志，
     只需把编号（如 1）写入 forwarder_data/agent_cmd.txt 即可点击对应按钮
     （例：回复 1 = 点击「接收短信验证码」，并附官方刷新时间提醒）；
@@ -236,6 +236,7 @@ class DouyinWebReceiver:
         self._pw: Playwright | None = None
         self._context: BrowserContext | None = None
         self._page: Page | None = None
+        self._browser_started_at: float = 0.0
         self._current_conv_text: str | None = None
         # 已捕获的私信消息接口数据（时间戳, 文本），用于准确提取视频卡片 ID
         self._msg_payloads: list[tuple[float, str]] = []
@@ -304,6 +305,36 @@ class DouyinWebReceiver:
         self._context = None
         self._page = None
         self._pw = None
+        self._browser_started_at = 0.0
+
+    async def check_healthy(self, timeout: float = 10.0) -> bool:
+        """看门狗探针：页面存在且能执行 JS 才算健康。"""
+        page = self._page
+        if page is None:
+            return False
+        try:
+            state = await asyncio.wait_for(page.evaluate("() => document.readyState"), timeout=timeout)
+            return bool(state)
+        except Exception:
+            return False
+
+    async def restart_browser(self, reason: str = "") -> None:
+        """看门狗/低峰维护：关闭并重建浏览器，保留登录态（profile 不变）。"""
+        logger.warning(f"重启浏览器{f'（{reason}）' if reason else ''}…")
+        try:
+            await self.close()
+        except Exception as e:
+            logger.warning(f"关闭旧浏览器失败（忽略）: {e}")
+        await asyncio.sleep(1.0)
+        await self._ensure_browser()
+        await self.ensure_login()
+        now = time.monotonic()
+        self._last_reload_ts = now
+        self._last_force_fetch_ts = now
+        self._last_probe_sig = ""
+        self._probe_failures = 0
+        self._empty_probe_count = 0
+        logger.success("浏览器重启完成")
 
     # ────────────── 登录截图链接服务 ──────────────
 
@@ -366,6 +397,7 @@ class DouyinWebReceiver:
         self._page.on("response", self._on_response)
         # 捕获接口请求中的会话 ID（用于锁定目标会话）
         self._page.on("request", self._on_request)
+        self._browser_started_at = time.time()
         logger.info(f"浏览器已启动（profile: {self.settings.browser_profile_dir}, headless={self.settings.headless}）")
 
     # ────────────── 私信消息接口拦截 ──────────────
@@ -765,7 +797,7 @@ class DouyinWebReceiver:
         return False
 
     async def _try_agent_cmd(self) -> bool:
-        """执行「远程控制台」输入文件（forwarder_data/agent_cmd.txt，每行一条，执行后自动删除）。
+        """执行「文件控制台」输入文件（forwarder_data/agent_cmd.txt，每行一条，执行后自动删除）。
 
         免记忆指令的对话式交互（登录等待期间每 3 秒检查一次，日常运行每轮轮询检查）：
 
@@ -812,7 +844,7 @@ class DouyinWebReceiver:
                 await self._log_login_menu(force=True)
         return executed
 
-    # ────────────── 远程控制台：解析与执行 ──────────────
+    # ────────────── 文件控制台：解析与执行 ──────────────
 
     async def _run_console_line(self, line: str) -> bool:
         """执行一条控制台输入，返回是否已处理。"""
@@ -1216,7 +1248,7 @@ class DouyinWebReceiver:
         accounts = self.effective_main_accounts
         shown = "、".join(accounts) if accounts else "(未设置：自动选择会话)"
         lines = [
-            "【远程控制台】使用说明",
+            "【文件控制台】使用说明",
             f"  当前监测账号（{len(accounts)} 个）: {shown}",
             "  任意文本（如：我的大号）→ 设为监测账号；多个用逗号分隔（如：小明,小红）",
             "  +昵称 / -昵称        → 追加 / 移除一个监测账号（多个用逗号分隔）",
@@ -1382,7 +1414,7 @@ class DouyinWebReceiver:
                 await self._save_storage_state()
                 return
 
-            # 远程控制台：执行 agent_cmd.txt 中的输入（编号选项 / 验证码 / 昵称等，执行后自动删除）
+            # 文件控制台：执行 agent_cmd.txt 中的输入（编号选项 / 验证码 / 昵称等，执行后自动删除）
             if await self._try_agent_cmd():
                 await self._snapshot_login_page()
 
@@ -1446,7 +1478,7 @@ class DouyinWebReceiver:
             logger.warning("登录态失效，重新扫码登录")
             await self.ensure_login()
 
-        # 远程控制台：随时可写输入（设置监测昵称 / 切换检测模式 / 立即轮询 / menu 等）
+        # 文件控制台：随时可写输入（设置监测昵称 / 切换检测模式 / 立即轮询 / menu 等）
         try:
             await self._try_agent_cmd()
         except Exception as e:
@@ -1496,6 +1528,10 @@ class DouyinWebReceiver:
                     continue
                 if fp in self._inflight:
                     # 本轮/本进程正在解析中（下载耗时可能跨多轮轮询）：避免重复
+                    continue
+                if not self.state.failure_due(fp):
+                    # 失败后仍在退避期：保持 seen，但不重新占用 inflight。
+                    # 到期后 due_failures 会自动重试；若原消息仍在首屏，也会重新成为候选。
                     continue
                 # 已识别但既无定论、又不在处理中 → 上次被中断（解析前/下载中重启），恢复处理
                 logger.info(f"恢复未完成的消息（上次被中断，重启后补处理）: {url}")

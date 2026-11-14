@@ -38,13 +38,18 @@ outline: deep
 | 双检测模式 | `reload`（整页刷新，最稳）/ `probe`（DOM 探针 + 定期取数，省资源），运行中可切换 |
 | 多会话监测 | 同时监测多个大号/聊天用户，按昵称锁定会话，其他会话的分享一律忽略 |
 | 接口优先提取 | 直接读取私信消息接口中的 `itemId`，准确、无需点击视频卡片 |
-| 三层去重 | 消息指纹 + 链接指纹 + 视频 ID 指纹；换链接重复转发也不会重复下载 |
+| 四层去重 | 消息指纹 + 链接指纹 + 视频 ID 指纹 + 内容 SHA-256；换链接/换作品 ID 重复转发也不会重复下载 |
 | 实况图支持 | 识别 `LivePhotoFile`，按 `video` / `live` / `both` / `comment` 四种模式推送；超限自动改发视频，`comment` 可把 Live Photo 发到评论区 |
 | Telegram 推送 | 视频带封面流式播放、图文相册、GIF、Live Photo；失败自动降级文档 |
 | 归档与元数据 | 原始媒体 + `metadata.json`（标题/作者/链接/媒体类型/实况图数量） |
-| 远程控制台 | 写 `agent_cmd.txt` 即可换昵称、切检测/实况图模式、填验证码、点登录菜单，免重启 |
+| 文件控制台 | 写 `agent_cmd.txt` 即可换昵称、切检测/实况图模式、填验证码、点登录菜单，免重启 |
+| Bot 控制台 | Telegram 私聊绑定唯一 owner；`/status` 看服务器状态、`/retry` 重试失败、发链接直接解析 |
+| 失败收件箱 | 失败分类 + 指数退避 + SQLite 落库；永久错误只试一次，达到上限推送卡片（重试/忽略/详情） |
+| 内容级去重 | 消息/链接/视频 ID 之外，再按最大媒体文件 SHA-256 去重，换号重发也不重复推 |
+| 自愈与告警 | 浏览器看门狗（无响应/内存/空闲重启）、磁盘水位、静默告警、外部心跳、每日摘要 |
 | 登录辅助 | 二维码字符画/base64、编号菜单、页面预览链接 |
 | 缓存清理 | 推送成功即删 + 定时 TTL 清理，磁盘不会无限增长 |
+| 本地索引 | SQLite 记录归档、失败和每日统计，支持 `/search`、`/stats`、`/last` |
 | 部署友好 | 一键 Ubuntu 脚本 + systemd + 交互式配置（账号 / 检测模式 / 实况图 / cookie） |
 | 零改动原项目 | `parse_hub_bot` 作为 git 子模块，解析/下载/媒体处理全部复用，未改一行 |
 
@@ -66,7 +71,9 @@ outline: deep
              ↓
        TgPusher：视频 / 图片相册 / GIF / Live Photo（按模式）
              ↓
-       推送成功后按配置删除本地归档；定时清理过期缓存
+       推送成功后按配置删除本地归档；SQLite 记录归档/消息 ID/统计
+             ↓
+       Owner 控制台：/status /stats /last /failures /retry /search；每日摘要/告警
 ```
 
 各阶段对应代码：
@@ -79,7 +86,11 @@ outline: deep
 | 归档 | `forwarder/archive.py` |
 | 去重 / 水位 | `forwarder/state.py` |
 | Telegram 推送 | `forwarder/tg_push.py` |
-| 服务主循环 / 缓存清理 | `forwarder/main.py` |
+| 服务主循环 / 队列 / 缓存清理 | `forwarder/main.py` |
+| Bot 控制台 / 失败卡片 | `forwarder/control.py` |
+| 失败分类 / 退避 | `forwarder/failures.py`、`forwarder/state.py` |
+| 本地索引（SQLite） | `forwarder/store.py` |
+| 服务器信息 / 看门狗 | `forwarder/sysinfo.py`、`forwarder/douyin_web.py` |
 | 配置 | `forwarder/config.py` / `.env.example` |
 
 ## 与原项目的关系
@@ -87,9 +98,10 @@ outline: deep
 | 部分 | 来源 | 说明 |
 | --- | --- | --- |
 | 解析 / 下载 / 媒体处理 | **parse_hub_bot 原项目** | 通过 `services.ParseService` / `services.ParsePipeline` 直接调用，未修改一行代码 |
-| 抖音 Web 接收端 | 本项目 `forwarder/douyin_web.py` | 登录、检测、消息提取、远程控制台 |
+| 抖音 Web 接收端 | 本项目 `forwarder/douyin_web.py` | 登录、检测、消息提取、文件控制台 |
 | 桥接与归档 | 本项目 `forwarder/parser_bridge.py`、`archive.py` | 在原项目临时目录清理前完成归档 |
-| 服务入口 | 本项目 `run.py`、`forwarder/main.py` | 常驻循环、解析重试、缓存清理 |
+| 服务入口 | 本项目 `run.py`、`forwarder/main.py` | 常驻循环、解析队列、失败重试、缓存清理 |
+| Bot 控制台 / 失败通知 | 本项目 `forwarder/control.py` | 复用同一个 bot Client，不额外起进程 |
 | Telegram 推送 | 复用原项目构建逻辑 | 新增 `forwarder/tg_push.py`，pyrogram 直连发送 |
 
 原项目以 **git 子模块**引入，可通过以下命令验证：
@@ -110,4 +122,5 @@ git -C parse_hub_bot status --porcelain
 - [快速开始](/guide/getting-started) — 安装、登录、启动
 - [检测模式](/guide/detection) — reload 与 probe 怎么选
 - [实况图](/guide/live-photo) — Live Photo 四种模式
+- [Bot 控制台](/guide/console) — 绑定 owner、远程运维
 - [完整配置](/guide/configuration) — 所有环境变量

@@ -54,6 +54,7 @@ class StateStore:
         self.max_entries = max(100, max_entries)
         self._data: dict[str, dict] = {
             "processed": {},
+            "content": {},
             "seen_messages": {},
             "settled": {},
             "flags": {},
@@ -89,7 +90,7 @@ class StateStore:
         tmp.replace(self.path)
 
     def _prune(self) -> None:
-        for key in ("processed", "seen_messages", "settled", "failures", "gave_up"):
+        for key in ("processed", "content", "seen_messages", "settled", "failures", "gave_up"):
             bucket = self._data.get(key)
             if not isinstance(bucket, dict) or len(bucket) <= self.max_entries:
                 continue
@@ -119,6 +120,24 @@ class StateStore:
         if not video_id:
             return
         self.mark_processed(fingerprint("video:" + video_id), url, output_dir)
+
+    # ────────────────────────── 内容级去重（文件 SHA-256） ──────────────────────────
+    # 同一段内容被重新发布成新的 aweme_id 时，视频 ID 去重无效；文件哈希是最后一道防线。
+    # 键直接使用 64 位 SHA-256（可读、可人工核对），不另做截断。
+
+    def is_content_processed(self, content_hash: str) -> bool:
+        return bool(content_hash) and content_hash in self._data.get("content", {})
+
+    def mark_content_processed(
+        self, content_hash: str, url: str = "", output_dir: str | None = None
+    ) -> None:
+        if not content_hash:
+            return
+        self._data.setdefault("content", {})[content_hash] = {
+            "url": url,
+            "output": output_dir,
+            "at": int(time.time()),
+        }
 
     # ────────────────────────── values（会话设置的持久化值） ──────────────────────────
 
@@ -163,27 +182,88 @@ class StateStore:
 
     # ────────────────────────── 失败计数 / 放弃 ──────────────────────────
 
-    def record_failure(self, fp: str, error: str) -> int:
-        """记录一次解析失败，返回累计失败次数。"""
+    def record_failure(
+        self,
+        fp: str,
+        error: str,
+        *,
+        category: str = "",
+        url: str = "",
+        max_attempts: int = 3,
+        backoff_base: int = 60,
+        backoff_max: int = 1800,
+    ) -> int:
+        """记录一次解析失败，返回累计失败次数。
+
+        同时写入下一次可重试时间（指数退避），避免每轮轮询都立刻重试。
+        手动重试（owner 按钮）会绕过该时间。
+        """
         bucket = self._data.setdefault("failures", {})
-        item = bucket.setdefault(fp, {"count": 0, "last_error": "", "at": 0})
-        item["count"] += 1
+        item = bucket.setdefault(
+            fp,
+            {"count": 0, "last_error": "", "category": "", "url": "", "at": 0, "retry_at": 0},
+        )
+        item["count"] = int(item.get("count", 0)) + 1
+        if url:
+            item["url"] = url
         item["last_error"] = error[:300]
+        item["category"] = category
         item["at"] = int(time.time())
-        return int(item["count"])
+        count = int(item["count"])
+        if count < max(1, max_attempts):
+            delay = min(max(1, backoff_max), max(1, backoff_base) * (2 ** (count - 1)))
+            item["retry_at"] = int(time.time()) + delay
+        else:
+            item["retry_at"] = 0
+        return count
+
+    def failure_due(self, fp: str) -> bool:
+        """是否已过退避时间（没有失败记录时返回 True）。"""
+        item = self._data.get("failures", {}).get(fp)
+        if not isinstance(item, dict):
+            return True
+        return int(item.get("retry_at", 0) or 0) <= int(time.time())
+
+    def get_failure(self, fp: str) -> dict:
+        item = self._data.get("failures", {}).get(fp)
+        return dict(item) if isinstance(item, dict) else {}
+
+    def due_failures(self, limit: int = 20) -> list[tuple[str, str, int]]:
+        """返回已到退避时间、尚未放弃的失败 (fp, url, count)。"""
+        now = int(time.time())
+        out: list[tuple[str, str, int]] = []
+        for fp, item in self._data.get("failures", {}).items():
+            if fp in self._data.get("gave_up", {}):
+                continue
+            if not isinstance(item, dict):
+                continue
+            retry_at = int(item.get("retry_at", 0) or 0)
+            if retry_at and retry_at <= now:
+                out.append((fp, str(item.get("url") or ""), int(item.get("count", 0) or 0)))
+                if len(out) >= max(1, int(limit)):
+                    break
+        return out
 
     def clear_failures(self, fp: str) -> None:
         self._data.setdefault("failures", {}).pop(fp, None)
 
-    def mark_gave_up(self, fp: str, url: str, reason: str) -> None:
+    def mark_gave_up(self, fp: str, url: str, reason: str, category: str = "") -> None:
         self._data.setdefault("gave_up", {})[fp] = {
             "url": url,
             "reason": reason[:300],
+            "category": category,
             "at": int(time.time()),
         }
 
     def is_gave_up(self, fp: str) -> bool:
         return fp in self._data.get("gave_up", {})
+
+    def get_gave_up(self, fp: str) -> dict:
+        item = self._data.get("gave_up", {}).get(fp)
+        return dict(item) if isinstance(item, dict) else {}
+
+    def clear_gave_up(self, fp: str) -> None:
+        self._data.get("gave_up", {}).pop(fp, None)
 
     # ────────────────────────── flags ──────────────────────────
 

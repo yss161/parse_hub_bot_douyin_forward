@@ -31,7 +31,7 @@ features:
     details: 识别 LivePhotoFile，按 video / live / both / comment 四种模式推送。
   - icon: 🗂️
     title: 归档与去重
-    details: 原始媒体 + metadata.json；消息/链接/视频 ID 三层去重。
+    details: 原始媒体 + metadata.json；消息/链接/视频 ID/内容哈希四层去重。
   - icon: 📨
     title: Telegram 推送
     details: 视频、图文相册、GIF、Live Photo；失败自动降级文档。

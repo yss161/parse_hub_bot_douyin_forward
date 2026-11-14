@@ -10,7 +10,7 @@ outline: deep
 
 **控制台设置（state.json） > `.env` > 代码默认值**
 
-修改 `.env` 后需重启服务；控制台命令下一轮生效。
+仅监测账号、检测模式、实况图模式支持运行中覆盖；其余配置以 `.env` 为准。修改 `.env` 后需重启服务；`agent_cmd.txt` / Bot 控制台命令下一轮生效。
 
 ## 监测账号
 
@@ -70,6 +70,44 @@ outline: deep
 | `BOT_TOKEN` | 空 | @BotFather 创建机器人获得 |
 | `BOT_PROXY` | 空 | 国内服务器代理，如 `http://127.0.0.1:7890` |
 
+## Bot 控制台 / Owner
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `FORWARDER_BOT_CONSOLE` | `true` | 是否启用 Telegram bot 控制台 |
+| `FORWARDER_BOT_BIND_CODE` | 空 | 首次绑定 owner 的密钥；为空时无法绑定 |
+| `FORWARDER_BIND_CODE_TTL` | `900` | 绑定码有效期（秒，从服务启动计时）；`0` = 不过期 |
+| `FORWARDER_FAILURE_NOTIFY` | `true` | 失败作品达到上限时私聊 owner |
+| `FORWARDER_PARSE_IN_GROUP` | `true` | 允许 owner 在关联讨论组发链接解析 |
+
+绑定和命令详见 [Bot 控制台](/guide/console)。
+
+## 失败处理 / 磁盘保护
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `FORWARDER_MAX_PARSE_ATTEMPTS` | `3` | 临时错误的最大重试次数；永久错误固定 1 次 |
+| `FORWARDER_RETRY_BACKOFF_BASE` | `60` | 首次退避秒数，之后逐次翻倍 |
+| `FORWARDER_RETRY_BACKOFF_MAX` | `1800` | 单次退避上限（秒） |
+| `FORWARDER_MIN_FREE_GB` | `3.0` | 输出目录可用空间低于该值时暂停解析；`0` = 关闭 |
+
+失败记录写入 `forwarder_data/forwarder.db`，可用 `/failures` 查看、`/retry` 重试。
+
+## 监控 / 摘要 / 看门狗
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `FORWARDER_HEALTHCHECK_URL` | 空 | 外部心跳 URL（healthchecks.io / Uptime Kuma push） |
+| `FORWARDER_HEALTHCHECK_INTERVAL` | `300` | 心跳间隔（秒） |
+| `FORWARDER_HEALTHCHECK_METHOD` | `GET` | 心跳请求方法 |
+| `FORWARDER_SILENT_ALERT_MINUTES` | `360` | 多久没有新候选就提醒 owner；`0` = 关闭 |
+| `FORWARDER_SUMMARY_ENABLED` | `true` | 每日摘要开关 |
+| `FORWARDER_SUMMARY_HOUR` | `22` | 每日摘要触发小时（本地时间 0-23） |
+| `FORWARDER_BROWSER_CHECK_INTERVAL` | `300` | 看门狗检查间隔（秒） |
+| `FORWARDER_BROWSER_MAX_RSS_MB` | `1800` | Chromium 内存超过该值时重启；`0` = 不按内存 |
+| `FORWARDER_BROWSER_RESTART_INTERVAL` | `86400` | 定时重启间隔（秒）；仅在队列空闲且 30 分钟无新候选时执行 |
+| `FORWARDER_CONTENT_HASH` | `true` | 按最大媒体文件 SHA-256 做内容级去重 |
+
 ## 登录预览 / 调试
 
 | 变量 | 默认 | 说明 |
@@ -113,4 +151,9 @@ TG_TARGET_CHAT=@your_channel
 API_ID=1234567
 API_HASH=xxxxxxxxxxxxxxxxxxxxxxxx
 BOT_TOKEN=123456789:AAxxxxxxxxxxxxxx
+
+# Bot 控制台（先私聊 bot 发送 /start <绑定码>）
+FORWARDER_BOT_CONSOLE=true
+FORWARDER_BOT_BIND_CODE=64位随机十六进制
+FORWARDER_FAILURE_NOTIFY=true
 ```

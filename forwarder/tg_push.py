@@ -19,14 +19,23 @@
 from __future__ import annotations
 
 import asyncio
-from itertools import batched
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+try:  # Python 3.12+
+    from itertools import batched
+except ImportError:  # Python 3.9/3.10 兼容
+    def batched(iterable: Any, n: int):  # type: ignore[misc]
+        items = list(iterable)
+        for i in range(0, len(items), n):
+            yield tuple(items[i : i + n])
 
 from log import logger
 
 from .config import ForwarderSettings, normalize_live_photo_mode
 from .fast_aes import install_fast_aes
+from .hashing import short_hash
 from .live_photo import send_live_photo
 
 logger = logger.bind(name="Forwarder/TgPush")
@@ -37,6 +46,17 @@ _CAPTION_MAX = 1000
 
 def _clip(text: str) -> str:
     return text if len(text) <= _CAPTION_MAX else text[: _CAPTION_MAX - 1] + "…"
+
+
+@dataclass
+class PushResult:
+    """一次推送的结果；Message 可能为 None（未启用推送或纯文本失败）。"""
+
+    ok: bool = True
+    message: Any = None
+    chat_id: int | None = None
+    message_id: int | None = None
+    link: str = ""
 
 
 class TgPusher:
@@ -55,6 +75,8 @@ class TgPusher:
         self._crypto_backend = "unknown"
         self._channel_id: int | None = None
         self._discussion_group_id: int | None = None
+        self._last_message: Any = None
+        self.client_ready = False
         # 频道帖 ID -> 讨论组里的自动转发消息 ID（即评论根消息）
         self._forward_cache: dict[int, int] = {}
         # 正在等待某几个频道帖的自动转发；同一时间只允许一个评论任务
@@ -72,14 +94,47 @@ class TgPusher:
                 raw = ""
         return normalize_live_photo_mode(raw or self.settings.live_photo_mode)
 
+    @property
+    def client(self) -> Any:
+        """底层 Pyrogram Client（控制台注册/失败通知共用）。"""
+        return self._cli
+
+    @property
+    def discussion_group_id(self) -> int | None:
+        return self._discussion_group_id
+
+    @property
+    def target_name(self) -> str:
+        return self._target_name
+
     # ────────────────────────── 生命周期 ──────────────────────────
 
     async def start(self) -> None:
-        if not self.settings.tg_push:
+        """启动 Telegram Client。
+
+        即使没有成品频道，只要启用了 owner 控制台/失败通知，也要启动 Client
+        才能接收 /start 绑定和发送私聊通知（同一个 BOT_TOKEN 只能有一个 session）。
+        """
+        want_push = bool(self.settings.tg_push and self.settings.tg_target)
+        owner_id = ""
+        used_code = ""
+        if self.state is not None:
+            try:
+                owner_id = self.state.get_value("owner_user_id") or ""
+                used_code = self.state.get_value("bind_code_used") or ""
+            except Exception:
+                owner_id = ""
+                used_code = ""
+        bind_code = (self.settings.bot_bind_code or "").strip()
+        code_available = bool(bind_code) and used_code != short_hash(bind_code)
+        want_console = bool(
+            self.settings.bot_console
+            and (code_available or owner_id)
+        )
+        if not want_push and not want_console:
             return
-        if not self.settings.tg_target:
+        if self.settings.tg_push and not self.settings.tg_target:
             logger.error("已启用 TG 推送（TG_PUSH=true）但未配置 TG_TARGET_CHAT，推送功能不可用")
-            return
 
         import os
 
@@ -98,7 +153,6 @@ class TgPusher:
 
         try:
             from core import bs
-            from plugins.helpers import parse_channel_ref
             from pyrogram import Client
         except Exception as e:
             logger.error(f"TG 推送依赖导入失败: {e}")
@@ -115,16 +169,24 @@ class TgPusher:
         else:
             logger.info(f"Telegram 加密加速: {self._crypto_backend}")
 
-        try:
-            raw = self.settings.tg_target.strip()
-            # 宽容处理: t.me/用户名/123 这类带消息 ID 的链接 -> 规范为 @用户名
-            m = re.match(r"^(?:https?://)?(?:t\.me|telegram\.me)/([A-Za-z][A-Za-z0-9_]{4,31})(?:/\d+)?/?$", raw)
-            if m:
-                raw = "@" + m.group(1)
-            target = parse_channel_ref(raw)
-        except ValueError as e:
-            logger.error(f"TG_TARGET_CHAT 配置无效: {e}")
-            return
+        target = None
+        if want_push:
+            try:
+                from plugins.helpers import parse_channel_ref
+
+                raw = self.settings.tg_target.strip()
+                # 宽容处理: t.me/用户名/123 这类带消息 ID 的链接 -> 规范为 @用户名
+                m = re.match(r"^(?:https?://)?(?:t\.me|telegram\.me)/([A-Za-z][A-Za-z0-9_]{4,31})(?:/\d+)?/?$", raw)
+                if m:
+                    raw = "@" + m.group(1)
+                target = parse_channel_ref(raw)
+            except ValueError as e:
+                logger.error(f"TG_TARGET_CHAT 配置无效: {e}")
+                if not want_console:
+                    return
+                logger.warning("成品频道配置无效，继续以 owner 控制台模式启动 Telegram")
+                want_push = False
+                target = None
 
         cli = Client(
             name=self._session_name,
@@ -139,16 +201,11 @@ class TgPusher:
         )
         try:
             await cli.start()
-            chat = await cli.get_chat(target)
-            self._target_name = getattr(chat, "title", None) or str(target)
-            self._channel_id = int(chat.id)
-            await self._setup_discussion_routing(cli, target)
         except Exception as e:
             logger.error(
-                f"TG 推送初始化失败: {e}\n"
+                f"Telegram Client 启动失败: {e}\n"
                 "请检查: 1) API_ID / API_HASH / BOT_TOKEN 是否正确；"
-                "2) 机器人是否已加入目标群组（频道需要设为管理员并有发帖权限）；"
-                "3) 服务器能否访问 Telegram（国内服务器需配置 BOT_PROXY）"
+                "2) 服务器能否访问 Telegram（国内服务器需配置 BOT_PROXY）"
             )
             try:
                 await cli.stop()
@@ -156,10 +213,34 @@ class TgPusher:
                 pass
             return
 
+        if target is not None:
+            try:
+                chat = await cli.get_chat(target)
+                self._target_name = getattr(chat, "title", None) or str(target)
+                self._channel_id = int(chat.id)
+                await self._setup_discussion_routing(cli, target)
+            except Exception as e:
+                logger.error(
+                    f"成品频道初始化失败: {e}\n"
+                    "请检查机器人是否已加入目标群组、是否有发帖权限。"
+                )
+                target = None
+                if not want_console:
+                    try:
+                        await cli.stop()
+                    except Exception:
+                        pass
+                    return
+                logger.warning("成品频道不可用，继续以 owner 控制台模式启动 Telegram")
+
         self._cli = cli
         self._target = target
-        self.enabled = True
-        logger.success(f"TG 推送已就绪 ✅ 目标: {self._target_name}")
+        self.enabled = target is not None
+        self.client_ready = True
+        if self.enabled:
+            logger.success(f"TG 推送已就绪 ✅ 目标: {self._target_name}")
+        else:
+            logger.success("Telegram Client 已就绪（仅 owner 控制台/失败通知，未配置成品频道）")
 
     async def _setup_discussion_routing(self, cli: Any, target: Any) -> None:
         """发现频道关联的讨论组，并监听频道帖的自动转发。
@@ -247,6 +328,7 @@ class TgPusher:
                 pass
             self._cli = None
             self.enabled = False
+            self.client_ready = False
 
     # ────────────────────────── 发送 ──────────────────────────
 
@@ -264,43 +346,82 @@ class TgPusher:
         )
         return caption, photos_videos, animations
 
-    async def push(self, parse_result: Any, processed_list: list) -> bool:
-        """推送一次解析结果；成功返回 True。异常在内部消化并记录日志。"""
+    async def push(self, parse_result: Any, processed_list: list) -> PushResult:
+        """推送一次解析结果，返回首条消息（用于记录 message_id / 评论定位）。"""
+        self._last_message = None
         if not self.enabled or self._cli is None:
-            return True
+            return PushResult(ok=True)
 
         mode = self.effective_live_photo_mode
         live_count = self._live_photo_count(processed_list)
+        ok = True
         if mode == "comment" and live_count > 0:
             try:
-                return await self._push_comment(parse_result, processed_list)
+                ok = await self._push_comment(parse_result, processed_list)
             except Exception as e:
                 logger.warning(f"评论模式推送失败（{e}），回退为普通视频推送")
-            return await self._push_normal(parse_result, processed_list)
-
-        if mode != "video" and live_count > 0:
+                await self._push_normal(parse_result, processed_list)
+        elif mode != "video" and live_count > 0:
             max_items = self.settings.live_photo_max_items
             if max_items > 0 and live_count > max_items:
                 logger.info(
                     f"实况图 {live_count} 张 > 上限 {max_items}，本次回退为视频模式（避免逐条发送刷屏）"
                 )
+                await self._push_normal(parse_result, processed_list)
             else:
                 try:
-                    return await self._push_live_photo(parse_result, processed_list)
+                    ok = await self._push_live_photo(parse_result, processed_list)
                 except Exception as e:
                     logger.warning(f"Live Photo 推送失败（{e}），回退为视频模式")
+                    await self._push_normal(parse_result, processed_list)
+        else:
+            await self._push_normal(parse_result, processed_list)
 
-        return await self._push_normal(parse_result, processed_list)
+        ok = bool(ok)
+        message = self._last_message
+        if message is None and ok:
+            ok = False
+        return PushResult(
+            ok=ok,
+            message=message,
+            chat_id=int(getattr(getattr(message, "chat", None), "id", 0) or 0) or None,
+            message_id=int(getattr(message, "id", 0) or 0) or None,
+            link=self.message_link(message),
+        )
+
+    def _remember(self, message: Any) -> Any:
+        if message is not None and self._last_message is None:
+            self._last_message = message
+        return message
+
+    @staticmethod
+    def message_link(message: Any) -> str:
+        """生成 t.me 链接（公开频道用 username，私有频道用 t.me/c）。"""
+        if message is None:
+            return ""
+        msg_id = int(getattr(message, "id", 0) or 0)
+        chat = getattr(message, "chat", None)
+        username = str(getattr(chat, "username", None) or "")
+        if username and msg_id:
+            return f"https://t.me/{username}/{msg_id}"
+        chat_id = int(getattr(chat, "id", 0) or 0)
+        if chat_id < 0 and msg_id:
+            raw = str(abs(chat_id))
+            if raw.startswith("100"):
+                raw = raw[3:]
+            return f"https://t.me/c/{raw}/{msg_id}"
+        return ""
 
     # ────────────── 普通推送（视频/图片/动画） ──────────────
 
-    async def _push_normal(self, parse_result: Any, processed_list: list) -> bool:
+    async def _push_normal(self, parse_result: Any, processed_list: list) -> Any:
         """原有推送逻辑：视频/图片/动画（LivePhotoFile 会被原项目映射为视频）。"""
         message = await self._push_normal_message(parse_result, processed_list)
         if message is None:
-            return False
+            return None
+        self._remember(message)
         logger.success(f"已推送至 Telegram: {self._target_name}")
-        return True
+        return message
 
     async def _push_normal_message(self, parse_result: Any, processed_list: list) -> Any:
         """普通推送，返回频道里的首条消息（供评论模式定位评论区）。"""
@@ -355,7 +476,8 @@ class TgPusher:
         normal_refs: list[Any] = []
         normal_processed: list[Any] = []
 
-        for ref, pm in zip(refs, processed_list, strict=False):
+        # Python 3.9 兼容：zip 不支持 strict 参数
+        for ref, pm in zip(refs, processed_list):
             if isinstance(pm.source, LivePhotoFile) and mode in ("live", "both", "comment"):
                 if self._live_pair_ok(pm):
                     live_pairs.append(
@@ -440,6 +562,7 @@ class TgPusher:
                         channel_message = await self._send_media_payload(
                             photos_videos, animations, caption
                         )
+                        self._remember(channel_message)
                 except Exception as e:
                     logger.warning(f"评论模式频道媒体发送失败（{e}），尝试改用首张静态图")
 
@@ -451,6 +574,7 @@ class TgPusher:
                         str(live_pairs[0][0]),
                         caption=caption,
                     )
+                    self._remember(channel_message)
                 except Exception as e:
                     logger.error(f"评论模式频道静态图发送失败: {e}")
                     return False
@@ -472,24 +596,26 @@ class TgPusher:
                 if index and interval:
                     await asyncio.sleep(interval)
                 try:
-                    await self._send_live(
+                    message = await self._send_live(
                         photo,
                         video,
                         "",
                         chat_id=self._discussion_group_id,
                         reply_to_message_id=root_id,
                     )
+                    self._remember(message)
                     sent += 1
                 except Exception as e:
                     failed += 1
                     logger.warning(f"评论区 Live Photo 发送失败（{e}），改发视频: {video.name}")
                     try:
-                        await self._send_video_file(
+                        message = await self._send_video_file(
                             pm,
                             "",
                             chat_id=self._discussion_group_id,
                             reply_to_message_id=root_id,
                         )
+                        self._remember(message)
                         sent += 1
                     except Exception as e2:
                         logger.error(f"评论区视频兜底发送失败: {e2}")
@@ -530,14 +656,16 @@ class TgPusher:
                 await asyncio.sleep(interval)
             cap = caption_pending
             try:
-                await self._send_live(photo, video, cap)
+                message = await self._send_live(photo, video, cap)
+                self._remember(message)
                 media_sent = True
                 caption_pending = ""
             except Exception as e:
                 failed += 1
                 logger.warning(f"Live Photo 发送失败（{e}），改发视频: {video.name}")
                 try:
-                    await self._send_video_file(pm, cap)
+                    message = await self._send_video_file(pm, cap)
+                    self._remember(message)
                     media_sent = True
                     caption_pending = ""
                 except Exception as e2:
@@ -548,7 +676,8 @@ class TgPusher:
                 photos_videos, animations = build_input_media(
                     normal_refs, normal_processed, video_cover=config.video_cover
                 )
-                await self._send_media_payload(photos_videos, animations, caption_pending)
+                message = await self._send_media_payload(photos_videos, animations, caption_pending)
+                self._remember(message)
                 media_sent = True
                 caption_pending = ""
             except Exception as e:
@@ -559,7 +688,8 @@ class TgPusher:
                 logger.error("实况图推送失败：没有任何媒体发送成功")
                 return False
             if caption_pending:
-                await self._send_text(caption_pending)
+                message = await self._send_text(caption_pending)
+                self._remember(message)
                 media_sent = True
 
         if failed:

@@ -48,6 +48,8 @@ class ParseOutcome:
     archive: ArchiveResult | None = None
     # 推送结果：None=未启用推送；True=推送成功；False=推送失败（解析与归档本身成功）
     push_ok: bool | None = None
+    # 内容级重复：归档文件的哈希已存在（不再推送，由调用方决定是否删除重复归档目录）
+    duplicate: bool = False
 
 
 def _default_locale_selector():
@@ -69,6 +71,7 @@ async def parse_url(
     reporter: LogStatusReporter | None = None,
     download: bool = True,
     on_files_ready: Callable[[Any], Awaitable[bool | None]] | None = None,
+    is_duplicate: Callable[[str], bool] | None = None,
 ) -> ParseOutcome:
     """用原项目的解析链路处理一个链接。
 
@@ -137,6 +140,16 @@ async def parse_url(
                 save_metadata=save_metadata,
             )
             outcome.ok = True
+
+            # 内容级去重：同一个文件（最大媒体文件的 SHA-256）已归档过，跳过推送
+            if is_duplicate is not None and outcome.archive.content_hash:
+                try:
+                    if is_duplicate(outcome.archive.content_hash):
+                        outcome.duplicate = True
+                        logger.info(f"内容重复，跳过推送: {outcome.archive.content_hash[:12]}… | {url}")
+                        return outcome
+                except Exception as e:
+                    logger.warning(f"内容去重检查失败（继续推送）: {e}")
 
             # 可选：归档完成后的后续动作（此刻归档文件与临时文件都有效，供推送使用）
             if on_files_ready is not None:

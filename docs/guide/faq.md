@@ -60,11 +60,11 @@ tgcrypto 只有 C 源码包，新版 Python 无预编译轮子，容易装失败
 
 ## 同一作品重复转发，会不会重复下载？
 
-不会。消息指纹 + 链接指纹 + 视频 ID 指纹三层去重；缓存清理后记录仍在 `state.json`。
+不会。消息指纹 + 链接指纹 + 视频 ID 指纹 + 内容 SHA-256 四层去重；缓存清理后记录仍在 `state.json`。
 
 ## 不想改 .env / 敲长命令？
 
-用远程控制台：`echo "我的大号" > forwarder_data/agent_cmd.txt` 换昵称；`echo 1` 点登录菜单；`echo "mode probe"` 切检测模式。
+用文件控制台：`echo "我的大号" > forwarder_data/agent_cmd.txt` 换昵称；`echo 1` 点登录菜单；`echo "mode probe"` 切检测模式。
 
 ## 服务器磁盘会不会被占满？
 
