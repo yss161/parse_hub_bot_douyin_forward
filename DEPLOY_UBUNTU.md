@@ -86,7 +86,7 @@ sudo APP_USER=douyin bash deploy/install_ubuntu.sh
 2. 检测 Python ≥ 3.12（不足则自动装 `python3.12`）；
 3. 创建虚拟环境 `.venv`，安装 `requirements-forwarder.txt`（默认**腾讯云 PyPI 镜像**，失败自动回退官方源）；
 4. 安装 Playwright Chromium 浏览器；
-5. 生成 `.env`（若不存在），并**交互式询问监测账号**（单会话 / 多会话）、**解析端 Cookie 方式**、**检测模式**（reload / probe）、**实况图模式**（video / live / both），按选择写入 .env；
+5. 生成 `.env`（若不存在），并**交互式询问监测账号**（单会话 / 多会话）、**解析端 Cookie 方式**、**检测模式**（reload / probe）、**实况图模式**（video / live / both / comment），按选择写入 .env；
 6. 安装 systemd 服务 `douyin-forward`（**安装但不启动**）；
 7. 打印「首次登录 + 启动服务」的后续步骤。
 
@@ -202,16 +202,22 @@ PARSER_COOKIE_MODE=auto sudo -E bash deploy/install_ubuntu.sh
       ❌ 每条实况图会多发一条视频；流量/存储约翻倍
       ℹ 超限的只发视频；实况图超过 10 张时实况图回退视频，避免刷屏
 
-   4) 保持不变（回车默认）
+   4) comment（视频发频道，实况图发评论区）
+      ✅ 频道只保留视频/相册；每张实况图作为该帖评论逐条发送
+      ✅ 没有可用视频、或频道发送失败时，才发第一张静态图（A 方案）
+      ⚠ 需要频道开启评论区，并把 bot 拉进关联讨论组（建议管理员）
+
+   5) 保持不变（回车默认）
 ──────────────────────────────────────────────
 ```
 
 - **选 1（默认）**：与旧版行为完全一致；
 - **选 2/3**：适合想保留 Live Photo 效果的场景；
+- **选 4**：频道只展示视频/相册，Live Photo 逐条进该帖评论区；需先开启频道评论区并把 bot 拉进讨论组；
 - 已部署后随时重配：`sudo bash /opt/douyin_download_bot/deploy/configure_live_photo.sh`；
-- 非交互部署：`LIVE_PHOTO_MODE=both sudo -E bash deploy/install_ubuntu.sh`。
+- 非交互部署：`LIVE_PHOTO_MODE=comment sudo -E bash deploy/install_ubuntu.sh`。
 
-> 运行中也可**免重启**切换：`echo "live both" | sudo tee forwarder_data/agent_cmd.txt`（`live video` 切回，`live` 查看当前模式）。
+> 运行中也可**免重启**切换：`echo "live comment" | sudo tee forwarder_data/agent_cmd.txt`（`live video` 切回，`live` 查看当前模式）。
 
 **可选环境变量**：
 
@@ -219,7 +225,7 @@ PARSER_COOKIE_MODE=auto sudo -E bash deploy/install_ubuntu.sh
 | --- | --- |
 | `APP_USER=douyin` | root 场景下指定服务用户 |
 | `DETECT_MODE` | 非交互式部署时预设检测模式（`reload` / `probe`） |
-| `LIVE_PHOTO_MODE` | 非交互式部署时预设实况图模式（`video` / `live` / `both`） |
+| `LIVE_PHOTO_MODE` | 非交互式部署时预设实况图模式（`video` / `live` / `both` / `comment`） |
 | `PIP_INDEX_URL=https://pypi.org/simple` | 覆盖 pip 镜像源 |
 
 ---
@@ -524,7 +530,7 @@ journalctl -u douyin-forward --since "30 min ago" | grep -E "已锁定|登录操
 | `mode` / `模式` | 查看当前检测模式、参数与说明 | 任意 |
 | `mode reload` / `mode probe` / `mode reset` | 切换检测模式（免重启，下一轮生效） | 任意 |
 | `live` / `实况` | 查看当前实况图模式与限制 | 任意 |
-| `live video` / `live live` / `live both` / `live reset` | 切换实况图模式（免重启，下一轮生效） | 任意 |
+| `live video` / `live live` / `live both` / `live comment` / `live reset` | 切换实况图模式（免重启，下一轮生效） | 任意 |
 | `刷新` / `refresh` | 重新截图并输出最新预览链接 | 登录期间 |
 
 写法示例（服务器上，用 `sudo tee` 规避权限问题）：
@@ -566,10 +572,10 @@ echo menu        | sudo tee /opt/douyin_download_bot/forwarder_data/agent_cmd.tx
 | `DOUYIN_FORCE_FETCH_INTERVAL` | `45` | probe：强制取数间隔（秒） |
 | `DOUYIN_RELOAD_INTERVAL` | `7200` | probe：自愈整页刷新间隔（秒），`0` = 关闭 |
 | `DOUYIN_RELOAD_ON_FAILURES` | `3` | probe：连续取数失败多少次触发自愈刷新 |
-| `FORWARDER_LIVE_PHOTO_MODE` | `video` | 实况图模式：`video` / `live` / `both` |
+| `FORWARDER_LIVE_PHOTO_MODE` | `video` | 实况图模式：`video` / `live` / `both` / `comment` |
 | `FORWARDER_LIVE_PHOTO_MAX_SECONDS` | `10` | 实况视频最大秒数，超过改发视频 |
 | `FORWARDER_LIVE_PHOTO_MAX_MB` | `10` | 实况视频最大 MB，超过改发视频 |
-| `FORWARDER_LIVE_PHOTO_MAX_ITEMS` | `10` | 实况图数量超过该值实况图回退视频；`0` = 不限 |
+| `FORWARDER_LIVE_PHOTO_MAX_ITEMS` | `10` | 非 comment：超过该值回退视频；comment：只限制评论区条数；`0` = 不限 |
 | `DOUYIN_ONLY_OTHERS` | `true` | 只处理对方（大号）发来的消息 |
 | `DOUYIN_PROCESS_HISTORY` | `false` | 首次运行是否处理历史转发 |
 

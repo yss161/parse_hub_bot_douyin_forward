@@ -32,7 +32,7 @@ sudo APP_USER=douyin bash deploy/install_ubuntu.sh
 | 1 | 监测账号 | 单会话 / 多会话 |
 | 2 | 解析端 Cookie | 不填 / 自动同步 / 手动 / 文件 / 保持 |
 | 3 | 检测模式 | reload（现状）/ probe（省资源） |
-| 4 | 实况图模式 | video（现状）/ live / both |
+| 4 | 实况图模式 | video（现状）/ live / both / comment（频道+评论区） |
 
 已部署后随时可重配：
 
@@ -97,5 +97,5 @@ sudo -E bash deploy/install_ubuntu.sh
 
 - 查看日志：`journalctl -u douyin-forward -f`；
 - 换监测账号：`echo "新昵称" | sudo tee forwarder_data/agent_cmd.txt`；
-- 切检测/实况图模式：`echo "mode probe"` / `echo "live both"`；
+- 切检测/实况图模式：`echo "mode probe"` / `echo "live both"` / `echo "live comment"`；
 - 升级：见[升级与回滚](/guide/upgrade)。

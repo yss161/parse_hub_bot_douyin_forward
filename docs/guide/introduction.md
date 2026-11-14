@@ -39,7 +39,7 @@ outline: deep
 | 多会话监测 | 同时监测多个大号/聊天用户，按昵称锁定会话，其他会话的分享一律忽略 |
 | 接口优先提取 | 直接读取私信消息接口中的 `itemId`，准确、无需点击视频卡片 |
 | 三层去重 | 消息指纹 + 链接指纹 + 视频 ID 指纹；换链接重复转发也不会重复下载 |
-| 实况图支持 | 识别 `LivePhotoFile`，按 `video` / `live` / `both` 三种模式推送；超限自动改发视频 |
+| 实况图支持 | 识别 `LivePhotoFile`，按 `video` / `live` / `both` / `comment` 四种模式推送；超限自动改发视频，`comment` 可把 Live Photo 发到评论区 |
 | Telegram 推送 | 视频带封面流式播放、图文相册、GIF、Live Photo；失败自动降级文档 |
 | 归档与元数据 | 原始媒体 + `metadata.json`（标题/作者/链接/媒体类型/实况图数量） |
 | 远程控制台 | 写 `agent_cmd.txt` 即可换昵称、切检测/实况图模式、填验证码、点登录菜单，免重启 |
@@ -109,5 +109,5 @@ git -C parse_hub_bot status --porcelain
 
 - [快速开始](/guide/getting-started) — 安装、登录、启动
 - [检测模式](/guide/detection) — reload 与 probe 怎么选
-- [实况图](/guide/live-photo) — Live Photo 三种模式
+- [实况图](/guide/live-photo) — Live Photo 四种模式
 - [完整配置](/guide/configuration) — 所有环境变量

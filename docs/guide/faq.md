@@ -80,15 +80,16 @@ tgcrypto 仅用于 Telegram 连接加密加速（可选），新版 Python 无�
 
 ## 实况图为什么还是视频？
 
-三种可能：① 模式仍是 `video`；② 视频超 10 秒/10MB；③ 实况图数量超过 `MAX_ITEMS`（默认 10）。查看启动日志「实况图模式」与推送日志。
+三种可能：① 模式仍是 `video`；② 视频超 10 秒/10MB；③ 实况图数量超过 `MAX_ITEMS`（默认 10）。`comment` 模式下还要确认频道已开启评论区、bot 在讨论组且有发言权限。查看启动日志「实况图模式」与推送日志。
 
-## 实况图三种模式怎么选？
+## 实况图四种模式怎么选？
 
 - 最稳、聊天最干净：`video`；
 - 真正 Live Photo：`live`（旧客户端只显示静态图）；
-- 兼容性最好：`both`（消息数约翻倍）。
+- 兼容性最好：`both`（消息数约翻倍）；
+- 频道只展示视频、Live Photo 放评论区：`comment`（需频道开启评论区，bot 在关联讨论组）。
 
-多图实况建议保留 `MAX_ITEMS=10`。
+多图实况建议保留 `MAX_ITEMS=10`；`comment` 模式下它只限制评论区条数，不影响频道视频相册。
 
 ## 检测模式怎么选？
 
@@ -100,7 +101,7 @@ tgcrypto 仅用于 Telegram 连接加密加速（可选），新版 Python 无�
 
 ## 为什么实况图没有相册，是一条条发？
 
-Telegram Bot API 的 `sendMediaGroup` 不支持 Live Photo，只能逐条 `sendLivePhoto`。用 `video` 模式可以回到相册发送。
+Telegram Bot API 的 `sendMediaGroup` 不支持 Live Photo，只能逐条 `sendLivePhoto`。用 `video` 模式可以回到相册发送；`comment` 模式下 Live Photo 逐条进评论区，频道仍用视频相册。
 
 ## 实况图归档为什么有 jpg 和 mp4？
 
@@ -111,4 +112,9 @@ Telegram Bot API 的 `sendMediaGroup` 不支持 Live Photo，只能逐条 `sendL
 1. 用公开实况图作品跑 `python run.py test-url <链接>`，确认解析结果包含 `LivePhotoRef`；
 2. 检查归档目录同时出现 `.jpg` 和 `_video.mp4`；
 3. 测试频道用 `live` 模式发一条，iOS/Android/Desktop 各看一次；
-4. 用 14 张图作品验证 `MAX_ITEMS` 回退。
+4. 用 14 张图作品验证 `MAX_ITEMS` 回退；
+5. 测试 `comment` 模式：频道收到视频/相册，同帖评论区收到 Live Photo。
+
+## comment 模式需要什么前置条件？
+
+频道必须开启评论区并关联讨论组；bot 必须加入该讨论组且有发言权限（建议管理员）。bot 不能调用 `messages.GetDiscussionMessage`，评论根依赖讨论组自动转发；等待超时会跳过评论，但频道媒体已正常发送。

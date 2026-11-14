@@ -44,7 +44,7 @@ journalctl -u douyin-forward -f
 - 视频：带封面、流式播放；
 - 图文：相册（每批最多 10 个）；
 - GIF：动画；
-- 实况图：按 `FORWARDER_LIVE_PHOTO_MODE` 发送 Live Photo / 视频 / 两者；
+- 实况图：按 `FORWARDER_LIVE_PHOTO_MODE` 发送 Live Photo / 视频 / 两者 / 频道+评论区；
 - 发送失败自动降级为文档；解析与本地归档不受影响。
 
 ## 实况图推送
@@ -56,7 +56,17 @@ Telegram 的 `sendLivePhoto` 需要两个文件：
 | `live_photo` | 实况视频，≤10 秒、≤10MB |
 | `photo` | 静态图 |
 
-超限或数量超过 `FORWARDER_LIVE_PHOTO_MAX_ITEMS` 时自动改发视频。详见[实况图](/guide/live-photo)。
+超限或数量超过 `FORWARDER_LIVE_PHOTO_MAX_ITEMS` 时自动改发视频；`comment` 模式把 Live Photo 发到帖子评论区。详见[实况图](/guide/live-photo)。
+
+### 频道 + 评论区（comment）
+
+频道只发视频/相册，Live Photo 逐条发到该帖评论区。需要：
+
+1. 频道开启评论区（关联讨论组）；
+2. bot 加入讨论组并有发言权限（建议管理员）；
+3. 频道发帖后等待讨论组自动转发，拿到评论根消息再回复。
+
+bot 无法调用 `messages.GetDiscussionMessage`，因此评论根映射完全依赖讨论组更新；等待超时会跳过评论，但频道媒体不受影响。
 
 ## 失败与重试
 
