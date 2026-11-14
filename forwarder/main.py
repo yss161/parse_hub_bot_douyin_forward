@@ -137,13 +137,16 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
         )
     reporter = LogStatusReporter("Pipeline")
     pusher = TgPusher(settings, state)
+    _live_mode = pusher.effective_live_photo_mode
     logger.info(
-        f"实况图模式: {pusher.effective_live_photo_mode}"
-        + ("（只发实况图）" if pusher.effective_live_photo_mode == "live"
-           else ("（实况图 + 视频）" if pusher.effective_live_photo_mode == "both" else "（只发视频）"))
+        f"实况图模式: {_live_mode}"
+        + ("（只发实况图）" if _live_mode == "live"
+           else ("（实况图 + 视频）" if _live_mode == "both"
+                 else ("（视频发频道，实况图发评论区）" if _live_mode == "comment" else "（只发视频）")))
         + f"；限制 ≤{settings.live_photo_max_seconds}s / ≤{settings.live_photo_max_mb}MB"
         + (
-            f"；实况图超过 {settings.live_photo_max_items} 张回退视频"
+            (f"；评论区最多 {settings.live_photo_max_items} 张" if _live_mode == "comment"
+             else f"；实况图超过 {settings.live_photo_max_items} 张回退视频")
             if settings.live_photo_max_items > 0
             else "；实况图数量不限制"
         )

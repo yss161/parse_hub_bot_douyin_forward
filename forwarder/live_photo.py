@@ -22,6 +22,8 @@ async def send_live_photo(
     photo: Path,
     video: Path,
     caption: str = "",
+    reply_to_message_id: int | None = None,
+    top_msg_id: int | None = None,
 ) -> Any:
     """发送一条 Live Photo，返回 pyrogram Message（或 None）。
 
@@ -31,6 +33,8 @@ async def send_live_photo(
         photo: 静态图路径（JPEG）。
         video: 实况视频路径（MP4，≤10 秒 / ≤10MB）。
         caption: 文案；为空时不带文案。
+        reply_to_message_id: 回复的消息 ID；评论区模式传讨论组根消息 ID。
+        top_msg_id: 论坛话题 ID；普通讨论组留空。
     """
     from pyrogram import raw, utils
 
@@ -94,12 +98,20 @@ async def send_live_photo(
     )
 
     # 3) 发送 Live Photo 消息；caption 的实体解析复用 pyrogram 的工具。
+    #    评论区模式：回复讨论组里的自动转发消息（root），而不是频道帖子。
+    reply_to = None
+    if reply_to_message_id:
+        reply_to = raw.types.InputReplyToMessage(
+            reply_to_msg_id=int(reply_to_message_id),
+            top_msg_id=int(top_msg_id) if top_msg_id else None,
+        )
     text = await utils.parse_text_entities(client, caption or "", None, None)
     result = await client.invoke(
         raw.functions.messages.SendMedia(
             peer=peer,
             media=media,
             random_id=client.rnd_id(),
+            reply_to=reply_to,
             **text,
         )
     )

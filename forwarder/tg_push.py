@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from itertools import batched
 from pathlib import Path
 from typing import Any
@@ -40,13 +41,23 @@ def _clip(text: str) -> str:
 class TgPusher:
     """把解析结果推送到 Telegram 群组/频道（发送逻辑由本模块实现，构建逻辑复用原项目）。"""
 
-    def __init__(self, settings: ForwarderSettings, state: Any = None) -> None:
+    def __init__(
+        self, settings: ForwarderSettings, state: Any = None, session_name: str = "forwarder_tg"
+    ) -> None:
         self.settings = settings
         self.state = state
+        self._session_name = session_name or "forwarder_tg"
         self.enabled = False
         self._cli: Any = None
         self._target: Any = None
         self._target_name = ""
+        self._channel_id: int | None = None
+        self._discussion_group_id: int | None = None
+        # 频道帖 ID -> 讨论组里的自动转发消息 ID（即评论根消息）
+        self._forward_cache: dict[int, int] = {}
+        # 正在等待某几个频道帖的自动转发；同一时间只允许一个评论任务
+        self._forward_waiter: tuple[set[int], asyncio.Future] | None = None
+        self._discussion_lock = asyncio.Lock()
 
     @property
     def effective_live_photo_mode(self) -> str:
@@ -103,18 +114,22 @@ class TgPusher:
             return
 
         cli = Client(
-            name="forwarder_tg",
+            name=self._session_name,
             api_id=api_id,
             api_hash=api_hash,
             bot_token=bot_token,
             workdir=str(bs.sessions_path),
-            no_updates=True,
+            # 评论模式需要监听讨论组的自动转发，才能把频道帖映射到评论根消息；
+            # 解析、发送本身仍是显式 chat_id，不依赖更新。
+            no_updates=False,
             proxy=bs.bot_proxy or None,
         )
         try:
             await cli.start()
             chat = await cli.get_chat(target)
             self._target_name = getattr(chat, "title", None) or str(target)
+            self._channel_id = int(chat.id)
+            await self._setup_discussion_routing(cli, target)
         except Exception as e:
             logger.error(
                 f"TG 推送初始化失败: {e}\n"
@@ -132,6 +147,84 @@ class TgPusher:
         self._target = target
         self.enabled = True
         logger.success(f"TG 推送已就绪 ✅ 目标: {self._target_name}")
+
+    async def _setup_discussion_routing(self, cli: Any, target: Any) -> None:
+        """发现频道关联的讨论组，并监听频道帖的自动转发。
+
+        Bot API 不允许 bot 调用 messages.GetDiscussionMessage / GetHistory，
+        但频道发帖后 Telegram 会把帖子自动转发到关联讨论组；该转发消息的 id
+        就是评论区根消息。监听这条更新即可完成映射。
+        """
+        from pyrogram import filters, raw as tg_raw
+
+        try:
+            peer = await cli.resolve_peer(target)
+            full = await cli.invoke(tg_raw.functions.channels.GetFullChannel(channel=peer))
+            linked = int(getattr(full.full_chat, "linked_chat_id", 0) or 0)
+        except Exception as e:
+            logger.warning(f"读取频道关联讨论组失败，评论模式不可用: {e}")
+            return
+
+        if not linked:
+            logger.info("目标频道未开启评论区（没有关联讨论组），comment 模式将回退为频道内发送")
+            return
+
+        group_id = linked if linked < 0 else -1_000_000_000_000 - linked
+        self._discussion_group_id = group_id
+
+        @cli.on_message(filters.chat(group_id))
+        async def _capture_forward(_, message: Any) -> None:
+            self._capture_discussion_forward(message)
+
+        logger.info(f"评论模式已就绪：讨论组 {group_id}（监听频道帖自动转发）")
+
+    def _capture_discussion_forward(self, message: Any) -> None:
+        """记录频道帖 -> 讨论组根消息的映射，并唤醒等待者。"""
+        origin = getattr(message, "forward_origin", None)
+        channel_id = int(getattr(getattr(origin, "chat", None), "id", 0) or 0)
+        post_id = int(getattr(origin, "message_id", 0) or 0)
+        if not channel_id or not post_id:
+            # 兼容旧版 pyrogram 的 forward_from_* 字段
+            channel_id = int(getattr(getattr(message, "forward_from_chat", None), "id", 0) or 0)
+            post_id = int(getattr(message, "forward_from_message_id", 0) or 0)
+        if not channel_id or not post_id:
+            return
+        if self._channel_id and channel_id != self._channel_id:
+            return
+
+        self._forward_cache[post_id] = int(message.id)
+        if len(self._forward_cache) > 300:
+            for old in list(self._forward_cache)[:100]:
+                self._forward_cache.pop(old, None)
+
+        waiter = self._forward_waiter
+        if waiter is not None:
+            wanted, future = waiter
+            if post_id in wanted and not future.done():
+                future.set_result(int(message.id))
+
+    async def _wait_discussion_root(self, post_ids: list[int], timeout: float = 10.0) -> int | None:
+        """等待频道帖在讨论组产生自动转发，返回评论根消息 id。"""
+        wanted = {int(x) for x in post_ids if x}
+        if not wanted or not self._discussion_group_id:
+            return None
+
+        future = asyncio.get_running_loop().create_future()
+        self._forward_waiter = (wanted, future)
+        try:
+            for post_id in wanted:
+                if post_id in self._forward_cache:
+                    return self._forward_cache[post_id]
+            return int(await asyncio.wait_for(future, timeout=timeout))
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"等待讨论组自动转发超时（帖子 {sorted(wanted)}，{timeout:.0f}s）；"
+                "评论模式本次跳过评论区"
+            )
+            return None
+        finally:
+            if self._forward_waiter is not None and self._forward_waiter[1] is future:
+                self._forward_waiter = None
 
     async def stop(self) -> None:
         if self._cli is not None:
@@ -165,6 +258,13 @@ class TgPusher:
 
         mode = self.effective_live_photo_mode
         live_count = self._live_photo_count(processed_list)
+        if mode == "comment" and live_count > 0:
+            try:
+                return await self._push_comment(parse_result, processed_list)
+            except Exception as e:
+                logger.warning(f"评论模式推送失败（{e}），回退为普通视频推送")
+            return await self._push_normal(parse_result, processed_list)
+
         if mode != "video" and live_count > 0:
             max_items = self.settings.live_photo_max_items
             if max_items > 0 and live_count > max_items:
@@ -183,36 +283,40 @@ class TgPusher:
 
     async def _push_normal(self, parse_result: Any, processed_list: list) -> bool:
         """原有推送逻辑：视频/图片/动画（LivePhotoFile 会被原项目映射为视频）。"""
+        message = await self._push_normal_message(parse_result, processed_list)
+        if message is None:
+            return False
+        logger.success(f"已推送至 Telegram: {self._target_name}")
+        return True
+
+    async def _push_normal_message(self, parse_result: Any, processed_list: list) -> Any:
+        """普通推送，返回频道里的首条消息（供评论模式定位评论区）。"""
         try:
             caption, photos_videos, animations = self.build_payload(parse_result, processed_list)
         except Exception as e:
             logger.error(f"构建 TG 推送载荷失败: {e}")
-            return False
+            return None
 
         total = len(photos_videos) + len(animations)
         logger.info(f"开始推送至 Telegram（媒体数: {total}）...")
         try:
-            await self._send_media_payload(photos_videos, animations, caption)
+            return await self._send_media_payload(photos_videos, animations, caption)
         except Exception as e:
             logger.warning(f"常规推送失败（{e}），降级为文档发送")
             try:
-                await self._send_as_documents(photos_videos, animations, caption)
+                return await self._send_as_documents(photos_videos, animations, caption)
             except Exception as e2:
                 logger.error(f"TG 推送失败: {e2}")
-                return False
+                return None
 
-        logger.success(f"已推送至 Telegram: {self._target_name}")
-        return True
-
-    async def _send_media_payload(self, photos_videos: list, animations: list, caption: str) -> None:
-        """按数量选择单条 / 相册 / 纯文本发送。"""
+    async def _send_media_payload(self, photos_videos: list, animations: list, caption: str) -> Any:
+        """按数量选择单条 / 相册 / 纯文本发送，返回首条消息。"""
         total = len(photos_videos) + len(animations)
         if total == 0:
-            await self._send_text(caption)
-        elif total == 1:
-            await self._send_single(animations + photos_videos, caption)
-        else:
-            await self._send_multi(photos_videos, animations, caption)
+            return await self._send_text(caption)
+        if total == 1:
+            return await self._send_single(animations + photos_videos, caption)
+        return await self._send_multi(photos_videos, animations, caption)
 
     # ────────────── 实况图推送 ──────────────
 
@@ -227,7 +331,7 @@ class TgPusher:
 
         返回 (live_pairs, normal_refs, normal_processed)：
           - live_pairs: [(photo_path, video_path, ProcessedMedia), ...]
-          - normal_*  : 其余媒体（both 模式下实况视频也会进 normal，走视频相册）
+          - normal_*  : 其余媒体（both/comment 模式下实况视频也会进 normal，走视频相册）
         """
         from parsehub.types import LivePhotoFile
         from utils.helpers import to_list
@@ -239,12 +343,12 @@ class TgPusher:
         normal_processed: list[Any] = []
 
         for ref, pm in zip(refs, processed_list, strict=False):
-            if isinstance(pm.source, LivePhotoFile) and mode in ("live", "both"):
+            if isinstance(pm.source, LivePhotoFile) and mode in ("live", "both", "comment"):
                 if self._live_pair_ok(pm):
                     live_pairs.append(
                         (Path(str(pm.source.path)), Path(str(pm.source.video_path)), pm)
                     )
-                    if mode == "both":
+                    if mode in ("both", "comment"):
                         # 视频也进普通列表（build_input_media 会把 LivePhotoFile 映射成视频）
                         normal_refs.append(ref)
                         normal_processed.append(pm)
@@ -285,6 +389,106 @@ class TgPusher:
             logger.info(f"实况视频 {video.name} 时长 {duration}s 超过 {max_seconds}s，改发视频")
             return False
         return True
+
+    async def _push_comment(self, parse_result: Any, processed_list: list) -> bool:
+        """评论模式：频道发视频/相册，Live Photo 逐条发到该帖评论区。
+
+        - 频道优先把解析出的视频（LivePhotoFile 会被 build_input_media 映射成视频）
+          按普通逻辑发成相册；没有视频时发第一张静态图（用户要求的 A 方案）。
+        - 频道消息发出后，等待讨论组的自动转发消息（评论根），再逐条 reply。
+        - 频道发送成功但评论区失败时不回退重发，避免频道出现重复帖子。
+        """
+        from plugins.helpers import build_caption
+        from plugins.parse.sender import build_input_media
+        from repo.settings import SettingsConfig
+
+        config = SettingsConfig()
+        caption = _clip(build_caption(parse_result, config=config) or "")
+        live_pairs, normal_refs, normal_processed = self._build_live_plan(parse_result, processed_list)
+        if not live_pairs:
+            logger.info("评论模式没有合格的实况图，改走普通推送")
+            return await self._push_normal(parse_result, processed_list)
+
+        max_items = self.settings.live_photo_max_items
+        if max_items > 0 and len(live_pairs) > max_items:
+            logger.info(
+                f"实况图 {len(live_pairs)} 张 > 评论区上限 {max_items}，"
+                f"只发前 {max_items} 张（频道视频仍完整发送）"
+            )
+            live_pairs = live_pairs[:max_items]
+
+        logger.info(
+            f"评论模式: 频道媒体 {len(normal_refs)} 项，评论区实况图 {len(live_pairs)} 张"
+        )
+
+        async with self._discussion_lock:
+            channel_message = None
+            if normal_refs:
+                try:
+                    photos_videos, animations = build_input_media(
+                        normal_refs, normal_processed, video_cover=config.video_cover
+                    )
+                    if photos_videos or animations:
+                        channel_message = await self._send_media_payload(
+                            photos_videos, animations, caption
+                        )
+                except Exception as e:
+                    logger.warning(f"评论模式频道媒体发送失败（{e}），尝试改用首张静态图")
+
+            if channel_message is None:
+                # A 方案：实在没有可发送的视频/媒体时，频道只发第一张静态图。
+                try:
+                    channel_message = await self._cli.send_photo(
+                        self._target,
+                        str(live_pairs[0][0]),
+                        caption=caption,
+                    )
+                except Exception as e:
+                    logger.error(f"评论模式频道静态图发送失败: {e}")
+                    return False
+
+            root_id = await self._wait_discussion_root([channel_message.id])
+            if root_id is None:
+                logger.warning(
+                    f"频道已发送（消息 {channel_message.id}），但未拿到讨论组根消息；"
+                    "本次评论区跳过，不回退重发"
+                )
+                logger.success(f"已推送至 Telegram: {self._target_name}")
+                return True
+
+            sent = 0
+            failed = 0
+            for photo, video, pm in live_pairs:
+                try:
+                    await self._send_live(
+                        photo,
+                        video,
+                        "",
+                        chat_id=self._discussion_group_id,
+                        reply_to_message_id=root_id,
+                    )
+                    sent += 1
+                except Exception as e:
+                    failed += 1
+                    logger.warning(f"评论区 Live Photo 发送失败（{e}），改发视频: {video.name}")
+                    try:
+                        await self._send_video_file(
+                            pm,
+                            "",
+                            chat_id=self._discussion_group_id,
+                            reply_to_message_id=root_id,
+                        )
+                        sent += 1
+                    except Exception as e2:
+                        logger.error(f"评论区视频兜底发送失败: {e2}")
+
+            if failed:
+                logger.warning(f"评论模式完成，但有 {failed} 张实况图发送失败")
+            logger.success(
+                f"评论模式完成：频道消息 {channel_message.id}，评论区 {sent} 条 "
+                f"（讨论组根消息 {root_id}）"
+            )
+            return True
 
     async def _push_live_photo(self, parse_result: Any, processed_list: list) -> bool:
         """实况图推送：逐条 send_live_photo；失败/超限回退视频。"""
@@ -347,54 +551,71 @@ class TgPusher:
         logger.success(f"已推送至 Telegram: {self._target_name}")
         return True
 
-    async def _send_live(self, photo: Path, video: Path, caption: str) -> None:
+    async def _send_live(
+        self,
+        photo: Path,
+        video: Path,
+        caption: str,
+        chat_id: Any = None,
+        reply_to_message_id: int | None = None,
+    ) -> Any:
         """发送一条 Live Photo（修正 kurigram 2.2.26 的 cover 引用问题）。"""
-        await send_live_photo(
+        return await send_live_photo(
             self._cli,
-            self._target,
+            chat_id or self._target,
             photo=photo,
             video=video,
             caption=caption or "",
+            reply_to_message_id=reply_to_message_id,
         )
 
-    async def _send_video_file(self, pm: Any, caption: str) -> None:
+    async def _send_video_file(
+        self,
+        pm: Any,
+        caption: str,
+        chat_id: Any = None,
+        reply_to_message_id: int | None = None,
+    ) -> Any:
         """把实况图降级为普通视频发送（带封面，失败去掉封面重试）。"""
         video = str(pm.source.video_path)
         cover = str(pm.source.path) if getattr(pm.source, "path", None) else None
+        target = chat_id or self._target
         try:
-            await self._cli.send_video(
-                self._target,
+            return await self._cli.send_video(
+                target,
                 video,
                 caption=caption or "",
                 video_cover=cover,
                 supports_streaming=True,
+                reply_to_message_id=reply_to_message_id,
             )
         except Exception as e:
             logger.warning(f"视频带封面发送失败（{e}），移除封面重试")
-            await self._cli.send_video(
-                self._target,
+            return await self._cli.send_video(
+                target,
                 video,
                 caption=caption or "",
                 supports_streaming=True,
+                reply_to_message_id=reply_to_message_id,
             )
 
     # ────────────── 单条 / 多条 / 文档降级 ──────────────
 
-    async def _send_text(self, caption: str) -> None:
+    async def _send_text(self, caption: str) -> Any:
         from pyrogram.types import LinkPreviewOptions
 
-        await self._cli.send_message(
+        return await self._cli.send_message(
             self._target,
             caption or "-",
             link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
 
-    async def _send_single(self, items: list, caption: str) -> None:
+    async def _send_single(self, items: list, caption: str) -> Any:
         from pyrogram.types import InputMediaAnimation, InputMediaPhoto, InputMediaVideo
 
         item = items[0]
         if isinstance(item, InputMediaAnimation):
-            await self._cli.send_animation(
+            return await self._cli.send_animation(
                 self._target,
                 item.media,
                 caption=caption,
@@ -402,11 +623,11 @@ class TgPusher:
                 width=item.width,
                 height=item.height,
             )
-        elif isinstance(item, InputMediaPhoto):
-            await self._cli.send_photo(self._target, item.media, caption=caption)
-        elif isinstance(item, InputMediaVideo):
+        if isinstance(item, InputMediaPhoto):
+            return await self._cli.send_photo(self._target, item.media, caption=caption)
+        if isinstance(item, InputMediaVideo):
             try:
-                await self._cli.send_video(
+                return await self._cli.send_video(
                     self._target,
                     item.media,
                     caption=caption,
@@ -418,7 +639,7 @@ class TgPusher:
                 )
             except Exception as e:
                 logger.warning(f"视频带封面发送失败（{e}），移除封面重试")
-                await self._cli.send_video(
+                return await self._cli.send_video(
                     self._target,
                     item.media,
                     caption=caption,
@@ -427,14 +648,14 @@ class TgPusher:
                     height=item.height,
                     supports_streaming=True,
                 )
-        else:
-            await self._cli.send_document(self._target, item.media, caption=caption)
+        return await self._cli.send_document(self._target, item.media, caption=caption)
 
-    async def _send_multi(self, photos_videos: list, animations: list, caption: str) -> None:
+    async def _send_multi(self, photos_videos: list, animations: list, caption: str) -> Any:
         # 动画逐条发送（与原项目一致：仅当没有图片/视频时，caption 落在最后一条动画上）
+        first = None
         for i, ani in enumerate(animations):
             cap = caption if (i == len(animations) - 1 and not photos_videos) else ""
-            await self._cli.send_animation(
+            message = await self._cli.send_animation(
                 self._target,
                 ani.media,
                 caption=cap,
@@ -442,9 +663,10 @@ class TgPusher:
                 width=ani.width,
                 height=ani.height,
             )
+            first = first or message
 
         if not photos_videos:
-            return
+            return first
 
         # 图片/视频分批走相册（每批最多 10 个），caption 落在最后一批的第一项
         for batch in batched(photos_videos, 10):
@@ -452,26 +674,33 @@ class TgPusher:
             if batch[-1] is photos_videos[-1]:
                 batch[0].caption = caption
             if len(batch) == 1:
-                await self._send_single(batch, getattr(batch[0], "caption", "") or "")
+                message = await self._send_single(batch, getattr(batch[0], "caption", "") or "")
             else:
-                await self._cli.send_media_group(self._target, media=batch)
+                messages = await self._cli.send_media_group(self._target, media=batch)
+                message = messages[0] if messages else None
+            first = first or message
+        return first
 
-    async def _send_as_documents(self, photos_videos: list, animations: list, caption: str) -> None:
+    async def _send_as_documents(self, photos_videos: list, animations: list, caption: str) -> Any:
         from pyrogram.types import InputMediaDocument
 
         docs = [InputMediaDocument(media=str(item.media)) for item in (animations + photos_videos)]
         if not docs:
             if caption:
-                await self._send_text(caption)
-            return
+                return await self._send_text(caption)
+            return None
 
+        first = None
         for batch in batched(docs, 10):
             batch = list(batch)
             if batch[-1] is docs[-1]:
                 batch[-1].caption = caption
             if len(batch) == 1:
-                await self._cli.send_document(
+                message = await self._cli.send_document(
                     self._target, batch[0].media, caption=getattr(batch[0], "caption", "") or ""
                 )
             else:
-                await self._cli.send_media_group(self._target, media=batch)
+                messages = await self._cli.send_media_group(self._target, media=batch)
+                message = messages[0] if messages else None
+            first = first or message
+        return first

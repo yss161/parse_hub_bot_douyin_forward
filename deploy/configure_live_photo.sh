@@ -7,18 +7,22 @@
 #   sudo bash deploy/configure_live_photo.sh       # .env 属主是服务用户时
 #
 # 非交互预设（自动化部署用）：
-#   LIVE_PHOTO_MODE=video bash deploy/configure_live_photo.sh
-#   LIVE_PHOTO_MODE=live  bash deploy/configure_live_photo.sh
-#   LIVE_PHOTO_MODE=both  bash deploy/configure_live_photo.sh
+#   LIVE_PHOTO_MODE=video   bash deploy/configure_live_photo.sh
+#   LIVE_PHOTO_MODE=live    bash deploy/configure_live_photo.sh
+#   LIVE_PHOTO_MODE=both    bash deploy/configure_live_photo.sh
+#   LIVE_PHOTO_MODE=comment bash deploy/configure_live_photo.sh
 #
 # 说明：
-#   1) video：只发视频（现状，最稳；实况图会变成普通视频）
-#   2) live ：只发实况图；视频超过 Telegram 限制（10 秒 / 10MB）时自动改发视频
-#   3) both ：实况图 + 视频；超限的只发视频
+#   1) video  ：只发视频（最稳；实况图会变成普通视频）
+#   2) live   ：只发实况图；视频超过 Telegram 限制（10 秒 / 10MB）时自动改发视频
+#   3) both   ：实况图 + 视频；超限的只发视频
+#   4) comment：视频/相册发频道，实况图逐条发该帖评论区；没有可用视频/频道发送失败时才发第一张静态图
 #   只对解析结果为实况图的作品生效；普通视频/图集不受影响。
-#   实况图数量超过 FORWARDER_LIVE_PHOTO_MAX_ITEMS（默认 10）时整帖回退视频，避免刷屏。
+#   非 comment 模式：实况图超过 FORWARDER_LIVE_PHOTO_MAX_ITEMS（默认 10）时整帖回退视频；
+#   comment 模式：该上限只限制评论区张数，频道视频仍完整发送。
+#   comment 模式需要频道开启评论区，并把 bot 拉进关联讨论组（建议管理员）。
 #
-# 运行中也可免重启切换：往 forwarder_data/agent_cmd.txt 写 "live live" / "live both" / "live video"
+# 运行中也可免重启切换：往 forwarder_data/agent_cmd.txt 写 "live comment" / "live both" / "live video"
 # ============================================================
 set -euo pipefail
 
@@ -71,13 +75,13 @@ mode="${LIVE_PHOTO_MODE:-}"
 
 # 非交互环境且未预设 → 跳过（不影响部署流程）
 if [ -z "$mode" ] && [ ! -t 0 ]; then
-  log "非交互式环境：跳过实况图模式配置（可用 LIVE_PHOTO_MODE=video|live|both 预设）"
+  log "非交互式环境：跳过实况图模式配置（可用 LIVE_PHOTO_MODE=video|live|both|comment 预设）"
   exit 0
 fi
 
 case "$mode" in
-  ""|video|live|both|keep) ;;
-  *) warn "未知的 LIVE_PHOTO_MODE=$mode（应为 video / live / both），改用交互式选择"; mode="" ;;
+  ""|video|live|both|comment|keep) ;;
+  *) warn "未知的 LIVE_PHOTO_MODE=$mode（应为 video / live / both / comment），改用交互式选择"; mode="" ;;
 esac
 
 if [ -z "$mode" ]; then
@@ -100,15 +104,21 @@ if [ -z "$mode" ]; then
   echo "      ❌ 每条实况图会多发一条视频；流量/存储约翻倍"
   echo "      ℹ 超限的只发视频；实况图超过 10 张时整帖回退视频，避免刷屏"
   echo
-  echo "   4) 保持不变（回车默认）"
+  echo "   4) comment（视频发频道，实况图发评论区）"
+  echo "      ✅ 频道只保留视频/相册；每张实况图作为该帖评论逐条发送"
+  echo "      ✅ 没有可用视频、或频道发送失败时，才发第一张静态图（A 方案）"
+  echo "      ⚠ 需要频道开启评论区，并把 bot 拉进关联讨论组（建议管理员）"
+  echo
+  echo "   5) 保持不变（回车默认）"
   echo "──────────────────────────────────────────────"
-  printf " 请选择 [1/2/3/4]: "
+  printf " 请选择 [1/2/3/4/5]: "
   read -r choice || choice=""
   case "${choice:-}" in
     1) mode="video" ;;
     2) mode="live" ;;
     3) mode="both" ;;
-    4) mode="keep" ;;
+    4) mode="comment" ;;
+    5) mode="keep" ;;
     "")
       if [ -n "${current:-}" ]; then mode="keep"; else mode="video"; fi
       ;;
@@ -133,7 +143,8 @@ write_env_value "FORWARDER_LIVE_PHOTO_MODE" "$mode"
 case "$mode" in
   live) log "已写入实况图模式: FORWARDER_LIVE_PHOTO_MODE=live（只发实况图，超限自动改视频）" ;;
   both) log "已写入实况图模式: FORWARDER_LIVE_PHOTO_MODE=both（实况图 + 视频，超限只发视频）" ;;
-  *)    log "已写入实况图模式: FORWARDER_LIVE_PHOTO_MODE=video（只发视频，现状）" ;;
+  comment) log "已写入实况图模式: FORWARDER_LIVE_PHOTO_MODE=comment（频道视频 + 评论区实况图）" ;;
+  *)    log "已写入实况图模式: FORWARDER_LIVE_PHOTO_MODE=video（只发视频）" ;;
 esac
 
 log "提示: 修改 .env 后需重启服务生效——sudo systemctl restart douyin-forward"

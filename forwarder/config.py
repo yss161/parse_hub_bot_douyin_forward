@@ -35,12 +35,20 @@ def split_accounts(raw: str) -> list[str]:
 
 
 def normalize_live_photo_mode(raw: str) -> str:
-    """规范化实况图模式：video（只发视频）/ live（只发实况图）/ both（两者都发）。"""
+    """规范化实况图模式。
+
+    video  ：只发视频（最稳）
+    live   ：只发实况图
+    both   ：实况图 + 视频
+    comment：视频/相册发频道，实况图逐条发该帖评论区
+    """
     value = (raw or "video").strip().lower()
     if value in ("live", "2", "livephoto", "live_photo", "实况", "实况图"):
         return "live"
     if value in ("both", "3", "all", "两者", "都要"):
         return "both"
+    if value in ("comment", "4", "comments", "评论区", "评论"):
+        return "comment"
     return "video"
 
 
@@ -105,7 +113,8 @@ class ForwarderSettings:
     # probe 模式：连续取数失败多少次后触发自愈刷新
     reload_on_failures: int = field(default_factory=lambda: _env_int("DOUYIN_RELOAD_ON_FAILURES", 3))
     # ─────────────── 实况图（Live Photo） ───────────────
-    # video：只发视频（现状，最稳）；live：只发实况图；both：实况图 + 视频
+    # video：只发视频（最稳）；live：只发实况图；both：实况图 + 视频
+    # comment：视频/相册发频道，实况图逐条发该帖评论区（频道需开启评论区，bot 在关联讨论组）
     # 仅对解析结果为 LivePhotoFile 的作品生效；视频超过 Telegram 限制（10 秒 / 10MB）时自动改发视频
     live_photo_mode: str = field(default_factory=lambda: _env("FORWARDER_LIVE_PHOTO_MODE", "video"))
     live_photo_max_seconds: int = field(
@@ -204,9 +213,11 @@ class ForwarderSettings:
             f"{self.reload_interval}s（连续失败 {self.reload_on_failures} 次自愈）",
             f"  实况图模式       : {self.normalized_live_photo_mode()}"
             + ("（只发实况图）" if self.normalized_live_photo_mode() == "live"
-               else ("（实况图 + 视频）" if self.normalized_live_photo_mode() == "both" else "（只发视频）")),
+               else ("（实况图 + 视频）" if self.normalized_live_photo_mode() == "both"
+                     else ("（视频发频道，实况图发评论区）" if self.normalized_live_photo_mode() == "comment"
+                           else "（只发视频）"))),
             f"  实况图限制       : ≤{self.live_photo_max_seconds}s / ≤{self.live_photo_max_mb}MB"
-            f" / 最多 {self.live_photo_max_items} 张（0=不限）",
+            f" / 最多 {self.live_photo_max_items} 张（0=不限；comment 模式只限制评论区数量）",
             f"  解析最小间隔     : {self.parse_min_interval}s",
             f"  输出目录         : {self.output_dir}",
             f"  跳过媒体处理     : {self.skip_media_processing}",

@@ -849,9 +849,10 @@ class DouyinWebReceiver:
         if m:
             return self._handle_mode_command((m.group(1) or "").strip())
 
-        # 4) 实况图模式（video / live / both）：免重启切换
+        # 4) 实况图模式（video / live / both / comment）：免重启切换
         m = re.fullmatch(
-            r"(?:live|livephoto|live_photo|实况|实况图)\s*(video|live|both|1|2|3|视频|实况|两者|reset|重置)?",
+            r"(?:live|livephoto|live_photo|实况|实况图)\s*"
+            r"(video|live|both|comment|1|2|3|4|视频|实况|两者|评论|评论区|reset|重置)?",
             low,
         )
         if m:
@@ -987,7 +988,7 @@ class DouyinWebReceiver:
         logger.info("\n" + "\n".join(lines))
 
     def _handle_live_photo_command(self, arg: str) -> bool:
-        """实况图模式查看/切换（video=只发视频，live=只发实况图，both=两者）。"""
+        """实况图模式查看/切换（video/live/both/comment）。"""
         arg = (arg or "").strip().lower()
         if arg in ("", "status", "状态"):
             self._log_live_photo_help()
@@ -1004,10 +1005,13 @@ class DouyinWebReceiver:
             "video": "video", "1": "video", "视频": "video",
             "live": "live", "2": "live", "实况": "live", "实况图": "live",
             "both": "both", "3": "both", "两者": "both", "都要": "both",
+            "comment": "comment", "4": "comment", "评论": "comment", "评论区": "comment",
         }
         mode = mapping.get(arg)
         if not mode:
-            raise RuntimeError("用法: live video | live live | live both | live reset")
+            raise RuntimeError(
+                "用法: live video | live live | live both | live comment | live reset"
+            )
         self.state.set_value("live_photo_mode", mode)
         self.state.save()
         logger.success(f"实况图模式已切换为 {mode}（下一轮生效）")
@@ -1019,14 +1023,21 @@ class DouyinWebReceiver:
         raw = self.state.get_value("live_photo_mode")
         mode = raw or self.settings.normalized_live_photo_mode()
         source = "控制台设置" if raw else ".env 默认"
+        max_items = self.settings.live_photo_max_items
+        if mode == "comment" and max_items > 0:
+            limit = f"；评论区最多 {max_items} 张（频道视频仍完整发送；0=不限）"
+        elif max_items > 0:
+            limit = f"；实况图超过 {max_items} 张时整帖回退视频（0=不限）"
+        else:
+            limit = "；实况图数量不限制"
         lines = [
             f"【实况图模式】当前: {mode}（来源: {source}）",
-            "  video：只发视频（现状，最稳）",
-            "  live ：只发实况图；视频超过 Telegram 限制时自动改发视频",
-            "  both ：实况图 + 视频；超限的只发视频",
-            "  切换（免重启，下一轮生效）: live video | live live | live both | live reset",
-            f"  当前限制: ≤{self.settings.live_photo_max_seconds}s / ≤{self.settings.live_photo_max_mb}MB"
-            f"；实况图超过 {self.settings.live_photo_max_items} 张时整帖回退视频（0=不限）",
+            "  video  ：只发视频（最稳）",
+            "  live   ：只发实况图；视频超过 Telegram 限制时自动改发视频",
+            "  both   ：实况图 + 视频；超限的只发视频",
+            "  comment：视频/相册发频道，实况图逐条发该帖评论区（需 bot 在关联讨论组）",
+            "  切换（免重启，下一轮生效）: live video | live live | live both | live comment | live reset",
+            f"  当前限制: ≤{self.settings.live_photo_max_seconds}s / ≤{self.settings.live_photo_max_mb}MB" + limit,
         ]
         logger.info("\n" + "\n".join(lines))
 
@@ -1212,7 +1223,7 @@ class DouyinWebReceiver:
             "  reset / 重置        → 清除自定义账号，恢复 .env 默认值",
             "  force / now / 立即  → 不等待轮询周期，立刻执行下一轮检查",
             "  mode / 模式         → 查看/切换检测模式（mode reload | mode probe | mode reset，免重启）",
-            "  live / 实况         → 查看/切换实况图模式（live video | live live | live both | live reset）",
+            "  live / 实况         → 查看/切换实况图模式（live video | live live | live both | live comment | live reset）",
             "  菜单 / help         → 重新显示本说明",
             "  纯数字验证码(4~8位)  → 登录流程中填入验证码输入框；`123456 go` = 填入并回车",
             "  登录/验证页会自动给出编号菜单：把数字写入指令文件即可点击对应按钮",
