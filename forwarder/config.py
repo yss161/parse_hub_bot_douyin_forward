@@ -73,6 +73,16 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = _env(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 def _env_path(name: str, default: Path) -> Path:
     raw = _env(name)
     if not raw:
@@ -122,8 +132,13 @@ class ForwarderSettings:
     )
     live_photo_max_mb: int = field(default_factory=lambda: _env_int("FORWARDER_LIVE_PHOTO_MAX_MB", 10))
     # 实况图数量超过该值时实况图回退为视频（避免逐条发送刷屏）；0 = 不限制
-    # 10 为常用上限：可覆盖 5–10 张的实况图作品，同时避免 14 张图集刷屏。
+    # 只对 live / both 模式生效；comment 模式评论区不限量（逐张发到评论区）。
     live_photo_max_items: int = field(default_factory=lambda: _env_int("FORWARDER_LIVE_PHOTO_MAX_ITEMS", 10))
+    # 逐条发送实况图时的间隔（秒），用于降低连续上传触发限流/风控的概率；0 = 不等待
+    # comment 模式评论根建立后，每张 Live Photo 之间等待该间隔；live/both 模式同理。
+    live_photo_send_interval: float = field(
+        default_factory=lambda: _env_float("FORWARDER_LIVE_PHOTO_SEND_INTERVAL", 2.0)
+    )
     max_clicks_per_poll: int = field(default_factory=lambda: _env_int("DOUYIN_MAX_CLICKS", 3))
     # 只处理"对方"（大号）发来的消息，忽略小号自己的消息
     only_others: bool = field(default_factory=lambda: _env_bool("DOUYIN_ONLY_OTHERS", True))
@@ -217,7 +232,11 @@ class ForwarderSettings:
                      else ("（视频发频道，实况图发评论区）" if self.normalized_live_photo_mode() == "comment"
                            else "（只发视频）"))),
             f"  实况图限制       : ≤{self.live_photo_max_seconds}s / ≤{self.live_photo_max_mb}MB"
-            f" / 最多 {self.live_photo_max_items} 张（0=不限；comment 模式只限制评论区数量）",
+            + (f" / 最多 {self.live_photo_max_items} 张（0=不限）"
+               if self.normalized_live_photo_mode() in ("live", "both")
+               else " / 评论区不限量" if self.normalized_live_photo_mode() == "comment"
+               else " / 只发视频"),
+            f"  实况图发送间隔   : {self.live_photo_send_interval:g}s（逐条上传之间的等待）",
             f"  解析最小间隔     : {self.parse_min_interval}s",
             f"  输出目录         : {self.output_dir}",
             f"  跳过媒体处理     : {self.skip_media_processing}",

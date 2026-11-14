@@ -25,12 +25,12 @@ outline: deep
 | `video`（默认） | 发视频 | 发视频 | 发视频 | — |
 | `live` | 发 Live Photo | **改发视频** | **回退视频** | 该条改发视频 |
 | `both` | Live Photo + 视频 | **只发视频** | **回退视频** | 该条改发视频 |
-| `comment` | 频道发视频/相册；评论区发 Live Photo | 频道发视频；该条不进评论区（视频不转码） | 频道视频完整发送；评论区只发前 N 张 | 该条评论改发视频 |
+| `comment` | 频道发视频/相册；评论区发 Live Photo | 频道发视频；该条不进评论区（视频不转码） | 频道视频完整发送；评论区**不限量** | 该条评论改发视频 |
 
 ## 超限与回退规则
 
 - Telegram 硬限制：`live_photo` 视频 **≤10 秒、≤10MB**；超限**不转码**，直接按普通视频发送（避免服务器依赖 ffmpeg）。
-- 实况图数量超过 `FORWARDER_LIVE_PHOTO_MAX_ITEMS`（默认 10）→ `live`/`both` 回退为视频；`comment` 只截断评论区，频道视频/相册仍完整发送；设为 `0` 可关闭限制。
+- 实况图数量超过 `FORWARDER_LIVE_PHOTO_MAX_ITEMS`（默认 10）→ `live`/`both` 回退为视频；`comment` 评论区不限量，此值不生效；设为 `0` 可关闭 `live`/`both` 的限制。
 - 缺静态图/视频、读取视频时长失败、`send_live_photo` 调用失败 → 该条自动改发视频（`comment` 模式下改发到同一条评论）。
 - 所有回退都会在日志中说明原因（`超过 10MB` / `时长 … 超过 10s` / `实况图 … 张 > 上限 …`）。
 
@@ -41,7 +41,8 @@ outline: deep
 | `FORWARDER_LIVE_PHOTO_MODE` | `video` | `video` / `live` / `both` / `comment` |
 | `FORWARDER_LIVE_PHOTO_MAX_SECONDS` | `10` | 实况视频最大秒数，超过改发视频 |
 | `FORWARDER_LIVE_PHOTO_MAX_MB` | `10` | 实况视频最大 MB，超过改发视频 |
-| `FORWARDER_LIVE_PHOTO_MAX_ITEMS` | `10` | `live`/`both`：超过该值回退视频；`comment`：只限制评论区条数；`0` = 不限 |
+| `FORWARDER_LIVE_PHOTO_MAX_ITEMS` | `10` | 只对 `live`/`both` 生效：超过该值回退视频；`0` = 不限；`comment` 不生效 |
+| `FORWARDER_LIVE_PHOTO_SEND_INTERVAL` | `2.0` | 逐条发送实况图之间的间隔秒数，降低连续上传触发限流/风控；`0` = 不等待 |
 
 ## 部署时选择
 
@@ -90,7 +91,8 @@ Telegram Bot API 不允许 bot 调用 `messages.GetDiscussionMessage` / `message
 
 ### 限制
 
-- 评论逐条发送，不组成相册；`FORWARDER_LIVE_PHOTO_MAX_ITEMS` 只限制评论条数（默认 10，`0` = 不限）；
+- 评论逐条发送，不组成相册；**评论区不限张数**，`FORWARDER_LIVE_PHOTO_MAX_ITEMS` 在 `comment` 模式不生效；
+- 每张 Live Photo 要上传静态图 + 实况视频，连续发送容易触发限流；`FORWARDER_LIVE_PHOTO_SEND_INTERVAL`（默认 2 秒）控制逐条间隔，设为 `0` 可关闭；
 - 评论发送失败不会回退到频道重发，避免同作品重复；只会在该评论位置改发视频；
 - 等待评论根超时会跳过本次评论（频道媒体已发送成功），日志会记录原因；
 - 该模式需要 bot 持续接收更新，资源占用略高于纯发送模式。
@@ -113,7 +115,8 @@ output/20261025_112210_7408859975616957696/
 
 ```text
 # 启动日志
-实况图模式: comment（视频发频道，实况图发评论区）；限制 ≤10s / ≤10MB；评论区最多 10 张
+实况图模式: comment（视频发频道，实况图发评论区）；限制 ≤10s / ≤10MB；评论区不限量
+实况图发送间隔   : 2s（逐条上传之间的等待）
 
 # 推送日志
 评论模式: 频道媒体 2 项，评论区实况图 2 张
@@ -121,7 +124,7 @@ output/20261025_112210_7408859975616957696/
 ```
 
 - 单张实况图作品：`live` 模式应收到一条可播放的 Live Photo；`comment` 模式频道收到视频、评论区收到 Live Photo；
-- 14 张实况图作品：默认 `MAX_ITEMS=10`，`live`/`both` 应回退为视频相册；`comment` 频道仍发完整视频相册、评论区最多 10 条；
+- 14 张实况图作品：默认 `MAX_ITEMS=10`，`live`/`both` 应回退为视频相册；`comment` 频道仍发完整视频相册、评论区 14 条全部发送；
 - 超 10 秒的视频：日志出现 `时长 … 超过 10s，改发视频`。
 
 ## 限制与已知问题

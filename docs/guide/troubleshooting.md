@@ -13,7 +13,7 @@ outline: deep
 | 「未找到私信会话」 | 昵称不匹配/未互关/消息在陌生人折叠 | 控制台写正确昵称；大号小号互关；把消息移出陌生人消息 |
 | 解析失败 | 解析端 cookie 失效/作品受限 | `python run.py test-url <链接>` 验证；检查 `cookie-config show` |
 | TG 推送失败 | 凭据错误/机器人无权限/网络不通 | 检查 API_ID/API_HASH/BOT_TOKEN、机器人管理员权限、`BOT_PROXY` |
-| 实况图仍是视频 | 模式为 `video`；视频超 10s/10MB；数量 > MAX_ITEMS；客户端不支持 | 查看启动日志与推送日志；调大限制或设 `MAX_ITEMS=0` |
+| 实况图仍是视频 | 模式为 `video`；视频超 10s/10MB；`live`/`both` 数量 > MAX_ITEMS；客户端不支持 | 查看启动日志与推送日志；调大限制或设 `MAX_ITEMS=0`；`comment` 不受数量限制 |
 | comment 模式评论区没有 Live Photo | 频道未开启评论区；bot 不在讨论组/无发言权限；等待评论根超时 | 检查频道评论区与 bot 成员权限；日志搜索「评论根」/`等待讨论组` |
 | probe 模式延迟大 | 强制取数周期长/页面卡死 | 调小 `DOUYIN_FORCE_FETCH_INTERVAL`；看是否有自愈 reload 日志 |
 | 预览链接打不开 | 8765 未放行/绑定地址 | 安全组放行或 SSH 隧道；检查 `FORWARDER_SHOT_BIND` |

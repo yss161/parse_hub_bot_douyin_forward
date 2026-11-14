@@ -48,7 +48,7 @@ outline: deep
 
 ## 为什么依赖清单里没有 tgcrypto？
 
-tgcrypto 仅用于 Telegram 连接加密加速（可选），新版 Python 无预编译轮子。本服务不启动 TG Bot，用不到；如要跑原项目 TG Bot 可单独安装。
+tgcrypto 只有 C 源码包，新版 Python 无预编译轮子，容易装失败。本服务改用 `cryptography` 的 C 后端做 AES-IGE 加速（`forwarder/fast_aes.py`），启动日志会显示 `Telegram 加密加速: cryptography`。没有它才退回 pyaes：实测 512KB 加密要 13.8 秒，49MB 视频光加密就超过 20 分钟，这正是大文件上传卡住的根因；换成 cryptography 后 49MB 约 3 秒。能装 tgcrypto 时仍是首选。
 
 ## 需要配置原项目的 Telegram Bot 吗？
 
@@ -80,7 +80,7 @@ tgcrypto 仅用于 Telegram 连接加密加速（可选），新版 Python 无�
 
 ## 实况图为什么还是视频？
 
-三种可能：① 模式仍是 `video`；② 视频超 10 秒/10MB；③ 实况图数量超过 `MAX_ITEMS`（默认 10）。`comment` 模式下还要确认频道已开启评论区、bot 在讨论组且有发言权限。查看启动日志「实况图模式」与推送日志。
+三种可能：① 模式仍是 `video`；② 视频超 10 秒/10MB；③ `live`/`both` 下实况图数量超过 `MAX_ITEMS`（默认 10）。`comment` 模式不受数量限制，但要确认频道已开启评论区、bot 在讨论组且有发言权限。查看启动日志「实况图模式」与推送日志。
 
 ## 实况图四种模式怎么选？
 
@@ -89,7 +89,7 @@ tgcrypto 仅用于 Telegram 连接加密加速（可选），新版 Python 无�
 - 兼容性最好：`both`（消息数约翻倍）；
 - 频道只展示视频、Live Photo 放评论区：`comment`（需频道开启评论区，bot 在关联讨论组）。
 
-多图实况建议保留 `MAX_ITEMS=10`；`comment` 模式下它只限制评论区条数，不影响频道视频相册。
+多图实况在 `live`/`both` 下建议保留 `MAX_ITEMS=10`；`comment` 模式评论区不限量，靠 `FORWARDER_LIVE_PHOTO_SEND_INTERVAL`（默认 2 秒）降低连续上传触发限流的概率。
 
 ## 检测模式怎么选？
 
@@ -112,7 +112,7 @@ Telegram Bot API 的 `sendMediaGroup` 不支持 Live Photo，只能逐条 `sendL
 1. 用公开实况图作品跑 `python run.py test-url <链接>`，确认解析结果包含 `LivePhotoRef`；
 2. 检查归档目录同时出现 `.jpg` 和 `_video.mp4`；
 3. 测试频道用 `live` 模式发一条，iOS/Android/Desktop 各看一次；
-4. 用 14 张图作品验证 `MAX_ITEMS` 回退；
+4. `live`/`both` 用 14 张图作品验证 `MAX_ITEMS` 回退；`comment` 验证 14 张全部进评论区且频道视频相册完整；
 5. 测试 `comment` 模式：频道收到视频/相册，同帖评论区收到 Live Photo。
 
 ## comment 模式需要什么前置条件？

@@ -45,7 +45,8 @@ outline: deep
 | `FORWARDER_LIVE_PHOTO_MODE` | `video` | `video`（只发视频）/ `live`（只发实况图）/ `both`（两者都发）/ `comment`（频道发视频/相册，实况图发评论区） |
 | `FORWARDER_LIVE_PHOTO_MAX_SECONDS` | `10` | 实况视频最大秒数，超过改发视频 |
 | `FORWARDER_LIVE_PHOTO_MAX_MB` | `10` | 实况视频最大 MB，超过改发视频 |
-| `FORWARDER_LIVE_PHOTO_MAX_ITEMS` | `10` | `live`/`both`：超过该值回退视频；`comment`：只限制评论区条数；`0` = 不限 |
+| `FORWARDER_LIVE_PHOTO_MAX_ITEMS` | `10` | 只对 `live`/`both` 生效：超过该值回退视频；`0` = 不限；`comment` 不生效 |
+| `FORWARDER_LIVE_PHOTO_SEND_INTERVAL` | `2.0` | 逐条发送实况图的间隔（秒）；`0` = 不等待；用于降低连续上传触发限流的概率 |
 
 ## 解析 / 归档 / 清理
 
@@ -103,8 +104,8 @@ DOUYIN_PROBE_INTERVAL=10
 DOUYIN_FORCE_FETCH_INTERVAL=45
 
 # 实况图（默认 video；想发 Live Photo 选 live / both；频道+评论区选 comment）
-FORWARDER_LIVE_PHOTO_MODE=both
-FORWARDER_LIVE_PHOTO_MAX_ITEMS=10
+FORWARDER_LIVE_PHOTO_MODE=comment
+FORWARDER_LIVE_PHOTO_SEND_INTERVAL=2.0
 
 # Telegram 推送
 TG_PUSH=true

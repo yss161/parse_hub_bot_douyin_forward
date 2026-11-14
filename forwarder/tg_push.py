@@ -26,6 +26,7 @@ from typing import Any
 from log import logger
 
 from .config import ForwarderSettings, normalize_live_photo_mode
+from .fast_aes import install_fast_aes
 from .live_photo import send_live_photo
 
 logger = logger.bind(name="Forwarder/TgPush")
@@ -51,6 +52,7 @@ class TgPusher:
         self._cli: Any = None
         self._target: Any = None
         self._target_name = ""
+        self._crypto_backend = "unknown"
         self._channel_id: int | None = None
         self._discussion_group_id: int | None = None
         # 频道帖 ID -> 讨论组里的自动转发消息 ID（即评论根消息）
@@ -101,6 +103,17 @@ class TgPusher:
         except Exception as e:
             logger.error(f"TG 推送依赖导入失败: {e}")
             return
+
+        # 大文件上传优化：Pyrogram 默认用纯 Python AES 加密每个 512KB 分片，
+        # 49MB 视频可能耗时数十分钟；启动时切到 cryptography/pycryptodome 的 C 后端。
+        self._crypto_backend = install_fast_aes()
+        if self._crypto_backend == "pyaes":
+            logger.warning(
+                "Telegram 加密未启用 C 加速（无 tgcrypto / cryptography / pycryptodome），"
+                "大文件上传会非常慢；建议 pip install cryptography"
+            )
+        else:
+            logger.info(f"Telegram 加密加速: {self._crypto_backend}")
 
         try:
             raw = self.settings.tg_target.strip()
@@ -409,16 +422,11 @@ class TgPusher:
             logger.info("评论模式没有合格的实况图，改走普通推送")
             return await self._push_normal(parse_result, processed_list)
 
-        max_items = self.settings.live_photo_max_items
-        if max_items > 0 and len(live_pairs) > max_items:
-            logger.info(
-                f"实况图 {len(live_pairs)} 张 > 评论区上限 {max_items}，"
-                f"只发前 {max_items} 张（频道视频仍完整发送）"
-            )
-            live_pairs = live_pairs[:max_items]
-
+        # 评论区不限制张数：逐条发到同一评论根下，超长图集也不会截断。
+        interval = max(0.0, float(self.settings.live_photo_send_interval or 0))
         logger.info(
             f"评论模式: 频道媒体 {len(normal_refs)} 项，评论区实况图 {len(live_pairs)} 张"
+            + (f"，逐条间隔 {interval:g}s" if interval else "")
         )
 
         async with self._discussion_lock:
@@ -458,7 +466,11 @@ class TgPusher:
 
             sent = 0
             failed = 0
-            for photo, video, pm in live_pairs:
+            for index, (photo, video, pm) in enumerate(live_pairs):
+                # 每张 Live Photo 要上传静态图 + 实况视频，连续发送容易触发限流；
+                # 用可配置间隔把上传摊开（0 = 不等待）。
+                if index and interval:
+                    await asyncio.sleep(interval)
                 try:
                     await self._send_live(
                         photo,
@@ -510,8 +522,12 @@ class TgPusher:
         caption_pending = caption
         media_sent = False
         failed = 0
+        interval = max(0.0, float(self.settings.live_photo_send_interval or 0))
 
-        for photo, video, pm in live_pairs:
+        for index, (photo, video, pm) in enumerate(live_pairs):
+            # 与 comment 模式一致：逐条上传之间留出间隔，降低连续发送触发限流的概率。
+            if index and interval:
+                await asyncio.sleep(interval)
             cap = caption_pending
             try:
                 await self._send_live(photo, video, cap)

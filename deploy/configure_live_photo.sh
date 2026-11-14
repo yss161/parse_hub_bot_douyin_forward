@@ -19,7 +19,8 @@
 #   4) comment：视频/相册发频道，实况图逐条发该帖评论区；没有可用视频/频道发送失败时才发第一张静态图
 #   只对解析结果为实况图的作品生效；普通视频/图集不受影响。
 #   非 comment 模式：实况图超过 FORWARDER_LIVE_PHOTO_MAX_ITEMS（默认 10）时整帖回退视频；
-#   comment 模式：该上限只限制评论区张数，频道视频仍完整发送。
+#   comment 模式：评论区不限张数，频道视频始终完整发送；逐条间隔由
+#   FORWARDER_LIVE_PHOTO_SEND_INTERVAL 控制（默认 2 秒），降低连续上传触发限流的概率。
 #   comment 模式需要频道开启评论区，并把 bot 拉进关联讨论组（建议管理员）。
 #
 # 运行中也可免重启切换：往 forwarder_data/agent_cmd.txt 写 "live comment" / "live both" / "live video"
@@ -102,11 +103,12 @@ if [ -z "$mode" ]; then
   echo "   3) both（实况图 + 视频）"
   echo "      ✅ 实况图和视频都保留，兼容性最好"
   echo "      ❌ 每条实况图会多发一条视频；流量/存储约翻倍"
-  echo "      ℹ 超限的只发视频；实况图超过 10 张时整帖回退视频，避免刷屏"
+  echo "      ℹ 超限的只发视频；实况图超过 FORWARDER_LIVE_PHOTO_MAX_ITEMS 时整帖回退视频，避免刷屏"
   echo
   echo "   4) comment（视频发频道，实况图发评论区）"
-  echo "      ✅ 频道只保留视频/相册；每张实况图作为该帖评论逐条发送"
+  echo "      ✅ 频道只保留视频/相册；每张实况图作为该帖评论逐条发送（不限张数）"
   echo "      ✅ 没有可用视频、或频道发送失败时，才发第一张静态图（A 方案）"
+  echo "      ℹ 逐条默认间隔 2 秒，可用 FORWARDER_LIVE_PHOTO_SEND_INTERVAL 调整"
   echo "      ⚠ 需要频道开启评论区，并把 bot 拉进关联讨论组（建议管理员）"
   echo
   echo "   5) 保持不变（回车默认）"
@@ -139,11 +141,12 @@ write_env_value "FORWARDER_LIVE_PHOTO_MODE" "$mode"
 [ -n "$(read_env_value FORWARDER_LIVE_PHOTO_MAX_SECONDS)" ] || write_env_value "FORWARDER_LIVE_PHOTO_MAX_SECONDS" "10"
 [ -n "$(read_env_value FORWARDER_LIVE_PHOTO_MAX_MB)" ] || write_env_value "FORWARDER_LIVE_PHOTO_MAX_MB" "10"
 [ -n "$(read_env_value FORWARDER_LIVE_PHOTO_MAX_ITEMS)" ] || write_env_value "FORWARDER_LIVE_PHOTO_MAX_ITEMS" "10"
+[ -n "$(read_env_value FORWARDER_LIVE_PHOTO_SEND_INTERVAL)" ] || write_env_value "FORWARDER_LIVE_PHOTO_SEND_INTERVAL" "2.0"
 
 case "$mode" in
   live) log "已写入实况图模式: FORWARDER_LIVE_PHOTO_MODE=live（只发实况图，超限自动改视频）" ;;
   both) log "已写入实况图模式: FORWARDER_LIVE_PHOTO_MODE=both（实况图 + 视频，超限只发视频）" ;;
-  comment) log "已写入实况图模式: FORWARDER_LIVE_PHOTO_MODE=comment（频道视频 + 评论区实况图）" ;;
+  comment) log "已写入实况图模式: FORWARDER_LIVE_PHOTO_MODE=comment（频道视频 + 评论区实况图，不限张数）" ;;
   *)    log "已写入实况图模式: FORWARDER_LIVE_PHOTO_MODE=video（只发视频）" ;;
 esac
 

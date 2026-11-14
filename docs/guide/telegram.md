@@ -56,7 +56,7 @@ Telegram 的 `sendLivePhoto` 需要两个文件：
 | `live_photo` | 实况视频，≤10 秒、≤10MB |
 | `photo` | 静态图 |
 
-超限或数量超过 `FORWARDER_LIVE_PHOTO_MAX_ITEMS` 时自动改发视频；`comment` 模式把 Live Photo 发到帖子评论区。详见[实况图](/guide/live-photo)。
+超限或 `live`/`both` 下数量超过 `FORWARDER_LIVE_PHOTO_MAX_ITEMS` 时自动改发视频；`comment` 模式把 Live Photo 发到帖子评论区（不限张数，逐条间隔默认 2 秒）。详见[实况图](/guide/live-photo)。
 
 ### 频道 + 评论区（comment）
 

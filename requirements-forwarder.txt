@@ -35,11 +35,14 @@ winloop>=0.3.1 ; sys_platform == "win32"
 
 # ---- 说明：tgcrypto（原项目列为依赖）此处刻意不装 ----
 # tgcrypto 只有 C 源码包（Python 3.12+ 无预编译轮子），无编译链时会安装失败；
-# 它仅用于 Telegram 连接的原生加密加速（kurigram 的 "fast" extra，可选），
-# 本服务不启动 Telegram Bot，运行时用不到；如确需安装：
-#   pip install tgcrypto
+# 它仅用于 Telegram 连接的原生加密加速（kurigram 的 "fast" extra，可选）。
+# 转发链路现在需要上传 Live Photo / 大视频，纯 Python AES 会让 49MB 视频
+# 上传耗时 20 分钟以上；这里改用 cryptography 的 C 后端（见 forwarder/fast_aes.py）。
+# 如服务器能装 tgcrypto，它仍是更快的首选；装不上也不影响。
 # 原项目 pyproject 中的 "tgcrypto>=1.2.5" 对应此项，此处省略不影响解析功能。
 
 # ---- 转发链路新增依赖 ----
 playwright>=1.40
+# Telegram MTProto AES-IGE 加速（C 后端）；没有它时 fast_aes 会退回 pyaes。
+cryptography>=41.0
 
