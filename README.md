@@ -563,7 +563,7 @@ Pyrogram 在未安装 tgcrypto 时使用 pyaes（纯 Python AES）。实测 512K
 [forwarder/fast_aes.py](forwarder/fast_aes.py) 在启动时检测可用后端，并替换 `pyrogram.crypto.aes` 的 `ige256_encrypt` / `ige256_decrypt`：
 
 1. 已装 tgcrypto → 直接使用（最快）；
-2. 否则用 cryptography 的 C 后端（本机实测 512KB 约 0.031 秒，约 16MB/s，49MB 加密约 3 秒）；
+2. 否则用 cryptography 的 C 后端（本机实测约 16MB/s；生产 2 vCPU 实测 10MB 约 1.16 秒，约 8.7MB/s，49MB 约 6 秒）；
 3. 没有 cryptography 再用 pycryptodome；
 4. 都没有则退回 pyaes，并打印警告。
 
@@ -1088,7 +1088,7 @@ bash -n deploy/*.sh
 自定义昵称也可以只重置昵称：往控制台写 `reset`。
 
 **Q9. 为什么依赖清单里没有 tgcrypto？上传大文件会不会很慢？**
-原项目将其列为依赖，但 tgcrypto 只有 C 源码包，新版 Python 无预编译轮子、无编译链时会安装失败。本服务改用 `cryptography` 的 C 后端做 AES-IGE 加速（见 `forwarder/fast_aes.py`），启动日志会打印 `Telegram 加密加速: cryptography`；没有它才退回 pyaes，并打印警告。实测 pyaes 加密 512KB 仅 0.04MB/s（49MB 要 20 分钟以上），cryptography 约 16MB/s（49MB 约 3 秒），差异来自纯 Python 与 C 实现，不是网络。能装 tgcrypto 时它仍是首选，装不上也不影响使用。
+原项目将其列为依赖，但 tgcrypto 只有 C 源码包，新版 Python 无预编译轮子、无编译链时会安装失败。本服务改用 `cryptography` 的 C 后端做 AES-IGE 加速（见 `forwarder/fast_aes.py`），启动日志会打印 `Telegram 加密加速: cryptography`；没有它才退回 pyaes，并打印警告。实测 pyaes 加密 512KB 仅 0.04MB/s（49MB 要 20 分钟以上）；cryptography 在本机约 16MB/s，生产 2 vCPU 约 8.7MB/s（49MB 约 6 秒），差异来自纯 Python 与 C 实现，不是网络。能装 tgcrypto 时它仍是首选，装不上也不影响使用。
 
 **Q10. 需要配置原项目的 Telegram Bot 吗（API_ID / API_HASH / BOT_TOKEN）？**
 **不需要**（除非你要用「推送到 Telegram 群组/频道」功能）。本服务只复用原项目的「解析引擎」（`services.ParseService` / `services.ParsePipeline` + parsehub 库），
