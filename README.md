@@ -1427,6 +1427,7 @@ Telegram Bot API 的 `sendMediaGroup` 不支持 Live Photo，只能逐条 `sendL
 
 | 日期 | 内容 |
 | --- | --- |
+| 2026-11-16 | 新增 BGM 评论区归档、失败链接兜底群、兜底视频还原 Live Photo；兜底支持超时删除频道链接、已删除作品跳过、历史失败批量重跑 |
 | 2026-11-14 | 新增 Bot 控制台 / owner 一次性绑定码、中文 `/help`、失败收件箱与分类重试、内容哈希去重、心跳/静默告警/每日摘要、浏览器看门狗、本地归档索引与 `/search`、服务器状态 `/status` |
 | 2026-11-14 | 新增 `comment` 模式：频道发视频/相册，Live Photo 逐条发同帖评论区；修复 Live Photo 上传失败（kurigram 2.2.26 cover 引用错误）；数量上限默认 3 → 10 |
 | 2026-10-25 | 实况图（Live Photo）三模式：`video` / `live` / `both`；超限自动改发视频；归档 jpg+mp4；控制台 `live` 命令 |
