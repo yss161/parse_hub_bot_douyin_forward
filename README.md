@@ -704,6 +704,8 @@ BGM 放在评论区第一条，避免被十几张 Live Photo 埋掉。没有评�
 
 解析最终失败（重试达到上限）后，可以把原始链接发到兜底群/频道，让另一个解析 bot 出片；成功后删除我们发的链接。该功能默认关闭，需要配置 `FORWARDER_FALLBACK_CHAT`。
 
+发送前会先查一次抖音详情：作品已被删除、仅自己可见或明确不可用时**不会发兜底**（换解析 bot 也拿不到），失败记录会标记为 `unavailable`。只有仍可能解析的失败（地区版权、接口临时失败等）才进入兜底。
+
 ### 两种部署形态
 
 | `FORWARDER_FALLBACK_CHAT` | 行为 |
@@ -726,18 +728,33 @@ BGM 放在评论区第一条，避免被十几张 Live Photo 埋掉。没有评�
 | --- | --- | --- |
 | `FORWARDER_FALLBACK_CHAT` | 空 | 兜底群/频道；留空关闭。支持 `@username` 或 `-100...` |
 | `FORWARDER_FALLBACK_BOT` | `@ParseHubot` | 兜底 bot 用户名；用于识别它的出片 |
-| `FORWARDER_FALLBACK_TIMEOUT` | `180` | 等待出片秒数；超时保留链接并私聊通知 owner |
+| `FORWARDER_FALLBACK_TIMEOUT` | `180` | 等待出片秒数；超时删除频道里的链接，只把原始链接留在 owner 私信 |
 | `FORWARDER_FALLBACK_DELETE_LINK` | `true` | 成功后是否删除我们发的链接 |
 | `FORWARDER_FALLBACK_MARKER` | `#fallback` | 链接消息前缀，便于人工识别 |
 | `FORWARDER_VIDEO_AS_LIVE` | `true` | 是否把兜底实况视频转回 Live Photo |
 | `FORWARDER_VIDEO_AS_LIVE_MAX_SECONDS` | `10` | 转换的最大秒数 |
 | `FORWARDER_VIDEO_AS_LIVE_MAX_MB` | `10` | 转换的最大体积 |
 
+### 历史失败重跑
+
+服务运行中可直接触发，无需重启。写入 `forwarder_data/fallback_replay.json`：
+
+```json
+{"mode": "all"}
+```
+
+也支持 `{"mode":"all","limit":10}`、`{"ids":[51,50]}`、`{"urls":["https://..."]}`。服务会读取后删除该文件，按顺序逐条发送链接，结果写入 `forwarder_data/fallback_replay_report.json`。
+
+- 已归档的链接跳过并标记 `resolved`；
+- 作品已删除/不可见（`status_deleted`、`status_self_see`、`status_unavailable` 等）跳过并标记 `unavailable`，不会出现在兜底群；
+- 成功/超时/报错都会删除频道里的链接，原始链接只保留在 owner 私信；
+- 批量模式不逐条私信，开场发完整清单，结束发汇总。
+
 ### 已知限制
 
 - **最大风险是消息可见性**：Telegram Bot API 不保证 bot 能收到另一个 bot 在群里发的消息；频道 `channel_post` 通常可收到，群聊里经常收不到。若日志一直看不到兜底 bot 的出片，需要改用用户账号监听，或把兜底 bot 放在频道里；
 - 兜底群必须是我们的 bot 已加入、且能发言的 chat；成品频道需要开启评论区并把 bot 拉进关联讨论组；
-- 超时只在 `FORWARDER_FALLBACK_TIMEOUT` 后通知 owner，不自动删除链接，方便人工处理；
+- 超时会把频道里的链接删除，只在 owner 私信保留原始链接；如果私信也发不出去，链接就只留在失败库里；
 - 同一个作品可能有多条视频；当前按消息逐条处理，每条视频单独复制/补评论。
 
 <a id="archive"></a>

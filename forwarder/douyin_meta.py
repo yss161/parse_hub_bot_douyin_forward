@@ -20,6 +20,31 @@ from log import logger
 
 logger = logger.bind(name="Forwarder/DouyinMeta")
 
+# 抖音详情接口的 filter_detail 标记：作品被删除 / 仅自己可见 / 不可用。
+# 这类作品换解析 bot 也拿不到，兜底没有意义，直接跳过。
+_DELETED_REASONS = frozenset({"status_deleted", "status_self_see", "status_unavailable"})
+_DELETED_NOTICES = (
+    "作品不见了",
+    "作品已删除",
+    "视频已删除",
+    "作品不存在",
+    "内容不存在",
+    "已被删除",
+    "已下架",
+)
+_DELETED_TEXT_MARKERS = (
+    "status_deleted",
+    "status_self_see",
+    "status_unavailable",
+    "作品不见了",
+    "作品已删除",
+    "视频已删除",
+    "作品不存在",
+    "内容不存在",
+    "已被删除",
+    "已下架",
+)
+
 _USER_AGENT = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
     "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
@@ -34,6 +59,32 @@ def _first_url(obj: Any) -> str:
             for u in urls:
                 if isinstance(u, str) and u.startswith("http"):
                     return u
+    return ""
+
+
+def deleted_reason(meta: dict[str, Any] | None) -> str:
+    """返回作品被删除/不可见的原因；可正常访问时返回空字符串。"""
+    if not isinstance(meta, dict):
+        return ""
+    reason = str(meta.get("unavailable_reason") or "").strip()
+    if reason in _DELETED_REASONS:
+        return reason
+    text = " ".join(
+        str(meta.get(key) or "")
+        for key in ("unavailable_notice", "unavailable_detail")
+    )
+    for marker in _DELETED_NOTICES:
+        if marker in text:
+            return reason or marker
+    return ""
+
+
+def deleted_reason_from_text(text: str | None) -> str:
+    """从解析错误文本里识别“作品已删除/不可见”。"""
+    value = str(text or "")
+    for marker in _DELETED_TEXT_MARKERS:
+        if marker in value:
+            return marker
     return ""
 
 
@@ -104,10 +155,16 @@ async def fetch_douyin_meta(url: str) -> dict[str, Any] | None:
         detail = (data or {}).get("aweme_detail") or data or {}
         if not isinstance(detail, dict):
             return None
+        filter_detail = detail.get("filter_detail") or {}
+        if not isinstance(filter_detail, dict):
+            filter_detail = {}
         return {
             "music": extract_music(detail.get("music")),
             "media": _classify_media(detail),
             "aweme_id": str(detail.get("aweme_id") or ""),
+            "unavailable_reason": str(filter_detail.get("filter_reason") or ""),
+            "unavailable_notice": str(filter_detail.get("notice") or ""),
+            "unavailable_detail": str(filter_detail.get("detail_msg") or ""),
         }
     except Exception as e:
         logger.warning(f"读取抖音附加信息失败（不影响主流程）: {e} | {url}")

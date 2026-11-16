@@ -14,6 +14,8 @@ outline: deep
 
 - 解析失败并按重试策略**最终放弃**（`attempts >= limit`）；
 - 不是「解析成功但 Telegram 推送失败」——推送失败只重试推送，不转发链接；
+- **作品已删除或不可见时不触发**：发送前先查抖音详情，`status_deleted`、`status_self_see`、`status_unavailable`（以及提示“作品不见了/已删除/已下架”）直接跳过，失败记录标记为 `unavailable`；换解析 bot 也拿不到，发出去只会刷屏；
+- 地区版权（`copyright_foreign`）、接口临时失败等仍会走兜底；
 - 同一链接只会发一次；成功接回后按配置删除我们发出的链接消息。
 
 ## 两种部署形态
@@ -46,7 +48,7 @@ FORWARDER_FALLBACK_BOT=@ParseHubot
 | --- | --- | --- |
 | `FORWARDER_FALLBACK_CHAT` | 空 | 兜底群/频道：`@username` 或 `-100...`；留空关闭 |
 | `FORWARDER_FALLBACK_BOT` | `@ParseHubot` | 兜底 bot 用户名，用于识别「谁发的算成品」 |
-| `FORWARDER_FALLBACK_TIMEOUT` | `180` | 等待出片秒数（最小 30）；超时保留链接并私聊 owner |
+| `FORWARDER_FALLBACK_TIMEOUT` | `180` | 等待出片秒数（最小 30）；超时删除频道里的链接，只把原始链接私聊给 owner |
 | `FORWARDER_FALLBACK_DELETE_LINK` | `true` | 成功接回后删除我们发的链接 |
 | `FORWARDER_FALLBACK_MARKER` | `#fallback` | 链接消息前缀，便于人工识别 |
 | `FORWARDER_VIDEO_AS_LIVE` | `true` | 兜底视频是否尝试还原成 Live Photo |
@@ -61,6 +63,8 @@ https://www.douyin.com/video/7706162379688245967
 copyright_foreign
 ```
 
+消息里的错误文本也会参与删除判定：若失败原因本身是 `status_deleted` / `status_self_see`，即使不查详情也会直接跳过。
+
 ## 视频还原成 Live Photo
 
 原始项目把实况图的每个 `LivePhotoFile` 发成一条短视频（静态图只作为视频封面）。本服务收到兜底视频后：
@@ -71,6 +75,23 @@ copyright_foreign
 4. 调用与正常实况图相同的 `send_live_photo`；超限/失败回退为普通视频。
 
 > 只对确认是实况来源的视频转换，普通视频不会误转。转换需要 `opencv-python-headless`（已在 `requirements-forwarder.txt` 声明；未安装时自动跳过转换，按普通视频处理）。
+
+## 历史失败重跑
+
+服务运行中即可触发，不需要重启。把任务写到工作目录下的 `forwarder_data/fallback_replay.json`：
+
+```json
+{"mode": "all"}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `mode` | `all` 重跑全部 `gave_up`，`unavailable` / `resolved` 不再重跑 |
+| `limit` | 最多处理几条（按时间倒序） |
+| `ids` | 指定失败记录 id 列表 |
+| `urls` | 直接指定链接列表（不依赖失败库） |
+
+服务发现文件后会删除它，并在 `forwarder_data/fallback_replay_report.json` 写入结果。批量模式先发一条清单私信，结束后发汇总；单条模式逐条私信。已归档和已删除/不可见的链接在清单阶段就被过滤，不会发到兜底群。
 
 ## 前置条件与风险
 
@@ -100,7 +121,13 @@ journalctl -u douyin-forward -f | grep -i fallback
 超时日志：
 
 ```text
-兜底超时（181s），保留链接: https://www.douyin.com/video/...
+兜底超时（181s），已删除频道链接，私信保留: https://www.douyin.com/video/...
+```
+
+已删除作品跳过：
+
+```text
+作品已删除/不可见（status_deleted），跳过兜底: https://www.douyin.com/video/...
 ```
 
 ## 关闭兜底
@@ -109,4 +136,4 @@ journalctl -u douyin-forward -f | grep -i fallback
 FORWARDER_FALLBACK_CHAT=
 ```
 
-重启后不再启动监听，也不会发送任何兜底链接；已有待处理链接由 Telegram 群里的消息保留，可手动清理。
+重启后不再启动监听，也不会发送任何兜底链接；服务停止期间已发出的链接不会自动清理，可手动删除。

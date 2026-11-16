@@ -56,7 +56,12 @@ def _install_log_stub() -> None:
 _install_log_stub()
 
 from forwarder.archive import update_metadata
-from forwarder.douyin_meta import _classify_media, extract_music
+from forwarder.douyin_meta import (
+    _classify_media,
+    deleted_reason,
+    deleted_reason_from_text,
+    extract_music,
+)
 from forwarder.fallback import FallbackService, PendingLink
 from forwarder.tg_push import PushResult, TgPusher
 from forwarder.video_live import convert_video_to_live
@@ -106,6 +111,32 @@ class DouyinMetaTests(unittest.TestCase):
         )
         self.assertEqual(image_post["kind"], "live")
         self.assertEqual(image_post["live_count"], 2)
+
+    def test_deleted_reason(self) -> None:
+        self.assertEqual(
+            deleted_reason({"unavailable_reason": "status_deleted"}), "status_deleted"
+        )
+        self.assertEqual(
+            deleted_reason({"unavailable_reason": "status_self_see"}), "status_self_see"
+        )
+        self.assertEqual(
+            deleted_reason({"unavailable_notice": "抱歉，作品不见了"}), "作品不见了"
+        )
+        self.assertEqual(
+            deleted_reason({"unavailable_detail": "因作品权限或已被删除，无法观看"}),
+            "已被删除",
+        )
+        self.assertEqual(deleted_reason({"unavailable_reason": "copyright_foreign"}), "")
+        self.assertEqual(deleted_reason(None), "")
+
+    def test_deleted_reason_from_text(self) -> None:
+        self.assertEqual(
+            deleted_reason_from_text("作品不可用: 抖音 status_deleted"), "status_deleted"
+        )
+        self.assertEqual(
+            deleted_reason_from_text("作品不可用: 抖音 status_self_see"), "status_self_see"
+        )
+        self.assertEqual(deleted_reason_from_text("流水线执行失败（详见上方日志）"), "")
 
 
 class ArchiveMetadataTests(unittest.TestCase):
@@ -313,6 +344,110 @@ class FallbackTests(unittest.TestCase):
         pending = PendingLink(url="https://a", link_message_id=11, finished=True)
         service._pending = {11: pending}
         self.assertIsNone(service._find_pending(_FakeMessage(200)))
+
+    def test_timeout_deletes_channel_link_and_keeps_private(self) -> None:
+        import asyncio
+
+        class _Cli:
+            def __init__(self) -> None:
+                self.deleted: list[tuple[int, int]] = []
+                self.sent: list[tuple[int, str]] = []
+
+            async def delete_messages(self, chat_id: int, message_id: int) -> None:
+                self.deleted.append((chat_id, message_id))
+
+            async def send_message(self, chat_id: int, text: str, **_: object) -> None:
+                self.sent.append((chat_id, text))
+
+        class _State:
+            def get_value(self, key: str, default: object = None) -> str:
+                return "777" if key == "owner_user_id" else ""
+
+        class _Settings:
+            fallback_timeout = 180
+            data_dir = Path(".")
+
+        service = FallbackService.__new__(FallbackService)
+        service._cli = _Cli()
+        service._chat_id = -100123
+        service.state = _State()
+        service.settings = _Settings()
+        pending = PendingLink(url="https://example.com/video/1", link_message_id=55)
+        asyncio.run(service._finish_failed(pending, "timeout", "180s 超时"))
+
+        self.assertTrue(pending.finished)
+        self.assertEqual(pending.result, "timeout")
+        self.assertTrue(pending.link_deleted)
+        self.assertEqual(service._cli.deleted, [(-100123, 55)])
+        self.assertEqual(len(service._cli.sent), 1)
+        self.assertEqual(service._cli.sent[0][0], 777)
+        self.assertIn("频道链接已删除", service._cli.sent[0][1])
+        self.assertIn("https://example.com/video/1", service._cli.sent[0][1])
+
+    def test_submit_skips_deleted_video(self) -> None:
+        import asyncio
+        from unittest.mock import patch
+
+        class _Cli:
+            def __init__(self) -> None:
+                self.sent = []
+
+            async def send_message(self, *args: object, **kwargs: object) -> None:
+                self.sent.append((args, kwargs))
+
+        async def _fake_meta(url: str) -> dict[str, str]:
+            return {"unavailable_reason": "status_deleted", "unavailable_notice": "抱歉，作品不见了"}
+
+        class _Store:
+            def __init__(self) -> None:
+                self.statuses = []
+
+            def set_failure_status(self, failure_id: int, status: str) -> None:
+                self.statuses.append((failure_id, status))
+
+        service = FallbackService.__new__(FallbackService)
+        service.enabled = True
+        service._cli = _Cli()
+        service._chat_id = -100123
+        service.settings = types.SimpleNamespace(fallback_marker="#fallback", data_dir=Path("."))
+        service._pending = {}
+        service.store = _Store()
+
+        with patch("forwarder.fallback.fetch_douyin_meta", _fake_meta):
+            pending = asyncio.run(
+                service.submit("https://www.douyin.com/video/1", "失败", failure_id=42)
+            )
+
+        self.assertIsNone(pending)
+        self.assertEqual(service._cli.sent, [])
+        self.assertEqual(service.store.statuses, [(42, "unavailable")])
+
+    def test_batch_timeout_does_not_spam_private(self) -> None:
+        import asyncio
+
+        class _Cli:
+            def __init__(self) -> None:
+                self.deleted = []
+                self.sent = []
+
+            async def delete_messages(self, chat_id: int, message_id: int) -> None:
+                self.deleted.append((chat_id, message_id))
+
+            async def send_message(self, chat_id: int, text: str, **_: object) -> None:
+                self.sent.append((chat_id, text))
+
+        service = FallbackService.__new__(FallbackService)
+        service._cli = _Cli()
+        service._chat_id = -100123
+        service.state = None
+        service.settings = types.SimpleNamespace(fallback_timeout=180, data_dir=Path("."))
+        pending = PendingLink(url="https://example.com/video/2", link_message_id=66, batch=True)
+        asyncio.run(service._finish_failed(pending, "timeout", "180s 超时"))
+
+        self.assertTrue(pending.finished)
+        self.assertTrue(pending.link_deleted)
+        self.assertEqual(service._cli.deleted, [(-100123, 66)])
+        self.assertEqual(service._cli.sent, [])
 
 
 if __name__ == "__main__":

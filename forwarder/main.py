@@ -150,7 +150,7 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
         )
     reporter = LogStatusReporter("Pipeline")
     pusher = TgPusher(settings, state)
-    fallback = FallbackService(settings, pusher, state)
+    fallback = FallbackService(settings, pusher, state, store)
     control = ControlPlane(settings, state, store, pusher, runtime, receiver)
     _live_mode = pusher.effective_live_photo_mode
     logger.info(
@@ -431,7 +431,7 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
                 f"❌ 解析失败（{kind.label}，已放弃）\n{job.url}\n{short_error(error, 200)}",
             )
             if not push_failed:
-                await fallback.submit(job.url, error)
+                await fallback.submit(job.url, error, failure_id=job.failure_id or None)
         else:
             # 临时候选失败：释放消息 inflight，退避期由 state.failure_due 控制，
             # 到期后 due_failures / 原消息都会重新触发，不会永久卡住。

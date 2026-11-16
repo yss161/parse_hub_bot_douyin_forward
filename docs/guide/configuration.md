@@ -66,7 +66,7 @@ outline: deep
 | --- | --- | --- |
 | `FORWARDER_FALLBACK_CHAT` | 空 | 兜底群/频道（`@username` / `-100...`）；留空关闭 |
 | `FORWARDER_FALLBACK_BOT` | `@ParseHubot` | 兜底 bot 用户名，用于识别出片 |
-| `FORWARDER_FALLBACK_TIMEOUT` | `180` | 等待出片秒数；超时保留链接并私聊 owner |
+| `FORWARDER_FALLBACK_TIMEOUT` | `180` | 等待出片秒数；超时删除频道链接，只私聊 owner 保留原始链接 |
 | `FORWARDER_FALLBACK_DELETE_LINK` | `true` | 成功后删除我们发的链接 |
 | `FORWARDER_FALLBACK_MARKER` | `#fallback` | 链接消息前缀 |
 | `FORWARDER_VIDEO_AS_LIVE` | `true` | 兜底实况视频是否还原成 Live Photo |
