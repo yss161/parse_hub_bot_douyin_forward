@@ -26,11 +26,13 @@ from typing import Any
 from log import logger
 
 from . import sysinfo
+from .archive import update_metadata
 from .config import ForwarderSettings, split_accounts
 from .control import ControlPlane
 from .cookie_config import apply_cookies, clear_cookies, current_cookies, export_from_browser, mask_cookie
 from .douyin_web import DouyinWebReceiver
 from .failures import classify_failure, short_error
+from .fallback import FallbackService
 from .jobs import ParseJob
 from .parser_bridge import ParseOutcome, parse_url
 from .reporter import LogStatusReporter
@@ -148,6 +150,7 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
         )
     reporter = LogStatusReporter("Pipeline")
     pusher = TgPusher(settings, state)
+    fallback = FallbackService(settings, pusher, state)
     control = ControlPlane(settings, state, store, pusher, runtime, receiver)
     _live_mode = pusher.effective_live_photo_mode
     logger.info(
@@ -259,9 +262,9 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
         runtime.parse_inflight += 1
         push_result: Any = None
 
-        async def push_cb(result: Any) -> bool:
+        async def push_cb(result: Any, meta: dict[str, Any] | None = None) -> bool:
             nonlocal push_result
-            push_result = await pusher.push(result.parse_result, result.processed_list)
+            push_result = await pusher.push(result.parse_result, result.processed_list, meta=meta)
             return bool(getattr(push_result, "ok", False))
 
         logger.info(f"开始解析（来源: {job.source}）: {job.url}")
@@ -278,6 +281,8 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
                     if settings.content_hash
                     else None
                 ),
+                fetch_meta=pusher.enabled and settings.normalized_bgm_mode() != "off",
+                meta_on_video=bool(settings.bgm_on_video),
             )
         except Exception as e:
             logger.exception(f"解析过程异常: {job.url} —— {e}")
@@ -318,6 +323,12 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
             return
 
         if outcome.ok and not push_failed:
+            # 回填 BGM/媒体类型（推送成功后，pusher 返回的 music 含 Telegram 消息位置）
+            if archive is not None and settings.save_metadata:
+                meta = outcome.meta or {}
+                music = getattr(push_result, "music", None) or meta.get("music")
+                if music:
+                    update_metadata(archive.dir, music=music, media=meta.get("media"))
             archive_dir = str(archive.dir) if archive else ""
             state.mark_processed(fp, job.url, archive_dir)
             if outcome.raw_url and outcome.raw_url != job.url:
@@ -419,6 +430,8 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
                 job,
                 f"❌ 解析失败（{kind.label}，已放弃）\n{job.url}\n{short_error(error, 200)}",
             )
+            if not push_failed:
+                await fallback.submit(job.url, error)
         else:
             # 临时候选失败：释放消息 inflight，退避期由 state.failure_due 控制，
             # 到期后 due_failures / 原消息都会重新触发，不会永久卡住。
@@ -570,6 +583,10 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
         if settings.tg_push:
             raise
         logger.warning(f"Telegram 客户端启动失败（控制台/通知不可用）: {e}")
+    try:
+        await fallback.start()
+    except Exception as e:
+        logger.warning(f"失败链接兜底服务启动异常（忽略）: {e}")
     if control.console_enabled and pusher.client_ready and pusher.client:
         try:
             control.register(pusher.client)
@@ -620,6 +637,7 @@ async def run_service(settings: ForwarderSettings | None = None, *, once: bool =
         for task in (worker_task, watchdog_task):
             task.cancel()
         await asyncio.gather(worker_task, watchdog_task, return_exceptions=True)
+        await fallback.stop()
         await pusher.stop()
         await receiver.close()
         store.close()

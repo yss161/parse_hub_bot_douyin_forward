@@ -47,6 +47,7 @@ journalctl -u douyin-forward -f
 - 图文：相册（每批最多 10 个）；
 - GIF：动画；
 - 实况图：按 `FORWARDER_LIVE_PHOTO_MODE` 发送 Live Photo / 视频 / 两者 / 频道+评论区；
+- 背景音乐：图片/图文/实况的 BGM 作为一条音频评论发到对应帖子评论区（普通视频默认不发）；
 - 发送失败自动降级为文档；解析与本地归档不受影响。
 
 ## 实况图推送
@@ -70,6 +71,10 @@ Telegram 的 `sendLivePhoto` 需要两个文件：
 
 bot 无法调用 `messages.GetDiscussionMessage`，因此评论根映射完全依赖讨论组更新；等待超时会跳过评论，但频道媒体不受影响。
 
+### 背景音乐（BGM）
+
+图片、图文与实况图作品的 BGM 会发在评论区第一条（在 Live Photo 之前），普通视频默认不发。详见[背景音乐归档](/guide/bgm)。
+
 ## 失败与重试
 
 - 失败按类型重试：网络最多 5 次、下载 4 次、Telegram 3 次；地区版权/审核/作者私密等永久错误只试 1 次；
@@ -79,6 +84,8 @@ bot 无法调用 `messages.GetDiscussionMessage`，因此评论根映射完全�
 - 常见失败：凭据错误、机器人无权限、服务器无法访问 Telegram。
 
 失败分类和 Bot 命令见 [Bot 控制台](/guide/console#失败收件箱)。
+
+如果频道里已有能解析失败链接的兜底 bot，可开启[失败兜底](/guide/fallback)：最终放弃时把链接发到兜底群，等待出片后接回频道，并删除链接。
 
 ## 国内服务器代理
 

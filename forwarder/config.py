@@ -139,6 +139,23 @@ class ForwarderSettings:
     live_photo_send_interval: float = field(
         default_factory=lambda: _env_float("FORWARDER_LIVE_PHOTO_SEND_INTERVAL", 2.0)
     )
+    # ─────────────── 背景音乐（BGM）评论区归档 ───────────────
+    # off    ：不解析/不发送 BGM
+    # comment：图片/图文/实况作品解析 BGM，上传到对应频道帖的评论区（普通视频默认不处理）
+    bgm_mode: str = field(default_factory=lambda: _env("FORWARDER_BGM_MODE", "comment"))
+    # 普通视频是否也发 BGM（默认 false：视频本身已包含声音，避免重复）
+    bgm_on_video: bool = field(default_factory=lambda: _env_bool("FORWARDER_BGM_ON_VIDEO", False))
+    # 是否在本地保留 music.mp3 副本（默认 false：上传后删除临时文件，节省服务器空间）
+    bgm_local_copy: bool = field(default_factory=lambda: _env_bool("FORWARDER_BGM_LOCAL_COPY", False))
+    bgm_max_mb: int = field(default_factory=lambda: _env_int("FORWARDER_BGM_MAX_MB", 20))
+    bgm_timeout: int = field(default_factory=lambda: _env_int("FORWARDER_BGM_TIMEOUT", 30))
+    # ─────────────── 兜底：视频转 Live Photo ───────────────
+    # 当来源确认是实况作品、但兜底 bot 只输出视频时，用 OpenCV 抽第一帧配对成 Live Photo。
+    video_as_live: bool = field(default_factory=lambda: _env_bool("FORWARDER_VIDEO_AS_LIVE", True))
+    video_as_live_max_seconds: int = field(
+        default_factory=lambda: _env_int("FORWARDER_VIDEO_AS_LIVE_MAX_SECONDS", 10)
+    )
+    video_as_live_max_mb: int = field(default_factory=lambda: _env_int("FORWARDER_VIDEO_AS_LIVE_MAX_MB", 10))
     max_clicks_per_poll: int = field(default_factory=lambda: _env_int("DOUYIN_MAX_CLICKS", 3))
     # 只处理"对方"（大号）发来的消息，忽略小号自己的消息
     only_others: bool = field(default_factory=lambda: _env_bool("DOUYIN_ONLY_OTHERS", True))
@@ -165,6 +182,21 @@ class ForwarderSettings:
     failure_notify: bool = field(default_factory=lambda: _env_bool("FORWARDER_FAILURE_NOTIFY", True))
     # 允许 owner 在关联讨论组里直接发链接/使用 /parse（群默认 privacy mode 可能收不到普通消息）
     parse_in_group: bool = field(default_factory=lambda: _env_bool("FORWARDER_PARSE_IN_GROUP", True))
+
+    # ─────────────── 失败链接兜底群 ───────────────
+    # 解析最终失败后，把原始链接发到兜底群/频道；兜底 bot 出片后本 bot 补 Live Photo。
+    # 留空 = 关闭。也可以直接填成品频道（与兜底 bot 同频道时只补评论区，不重复发媒体）。
+    fallback_chat: str = field(default_factory=lambda: _env("FORWARDER_FALLBACK_CHAT"))
+    # 兜底 bot 的用户名或数字 ID（用于识别它的出片消息）
+    fallback_bot: str = field(default_factory=lambda: _env("FORWARDER_FALLBACK_BOT", "@ParseHubot"))
+    # 等待兜底 bot 出片的超时（秒）；超时保留链接并通知 owner
+    fallback_timeout: int = field(default_factory=lambda: _env_int("FORWARDER_FALLBACK_TIMEOUT", 180))
+    # 成功后是否删除我们发出的链接消息
+    fallback_delete_link: bool = field(
+        default_factory=lambda: _env_bool("FORWARDER_FALLBACK_DELETE_LINK", True)
+    )
+    # 链接消息前缀标记，便于人工识别与日志排查
+    fallback_marker: str = field(default_factory=lambda: _env("FORWARDER_FALLBACK_MARKER", "#fallback"))
 
     # ─────────────── 失败重试策略 ───────────────
     # 临时错误最大尝试次数（永久错误只试 1 次；分类见 forwarder/failures.py）
@@ -251,6 +283,15 @@ class ForwarderSettings:
         raw = (self.detect_mode or "reload").strip().lower()
         return "probe" if raw in ("probe", "b", "planb", "plan_b", "探针", "轻量") else "reload"
 
+    def normalized_bgm_mode(self) -> str:
+        """规范化 BGM 模式：只认 off / comment。"""
+        raw = (self.bgm_mode or "comment").strip().lower()
+        return "off" if raw in ("off", "0", "false", "no", "none", "关闭", "不发") else "comment"
+
+    @property
+    def fallback_enabled(self) -> bool:
+        return bool(self.fallback_chat.strip())
+
     def describe(self) -> str:
         accounts = self.main_accounts
         if not accounts:
@@ -280,6 +321,12 @@ class ForwarderSettings:
                else " / 评论区不限量" if self.normalized_live_photo_mode() == "comment"
                else " / 只发视频"),
             f"  实况图发送间隔   : {self.live_photo_send_interval:g}s（逐条上传之间的等待）",
+            f"  BGM 归档         : {self.normalized_bgm_mode()}"
+            + ("（图片/图文/实况发评论区）" if self.normalized_bgm_mode() == "comment" else "（关闭）")
+            + (f"；普通视频也发" if self.bgm_on_video else "；普通视频不发"),
+            f"  兜底视频转实况   : {'已启用' if self.video_as_live else '关闭'}"
+            + f"（≤{self.video_as_live_max_seconds}s / ≤{self.video_as_live_max_mb}MB）",
+            f"  失败兜底群       : {self.fallback_chat or '未配置'}",
             f"  解析最小间隔     : {self.parse_min_interval}s",
             f"  输出目录         : {self.output_dir}",
             f"  跳过媒体处理     : {self.skip_media_processing}",

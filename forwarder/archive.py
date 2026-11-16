@@ -136,6 +136,28 @@ def build_metadata(
     }
 
 
+def update_metadata(target_dir: Path, **fields: Any) -> bool:
+    """更新归档目录中的 metadata.json（不存在则创建）。
+
+    用于推送完成后回填 BGM 的 Telegram 消息位置、兜底来源等附加信息。
+    失败只返回 False，不影响主流程。
+    """
+    try:
+        path = Path(target_dir) / "metadata.json"
+        data: dict[str, Any] = {}
+        if path.is_file():
+            data = json.loads(path.read_text(encoding="utf-8") or "{}")
+            if not isinstance(data, dict):
+                data = {}
+        for key, value in fields.items():
+            if value is not None:
+                data[key] = value
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
 def archive_result(
     result: Any,
     *,

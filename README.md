@@ -51,7 +51,7 @@ pnpm docs:dev
 
 - [文档站点](#docs-site) · [功能特性](#features) · [工作流程](#flow) · [与原项目的关系](#relation) · [目录结构](#layout)
 - [环境要求](#requirements) · [快速开始](#quickstart) · [运行模式](#run-modes) · [文件控制台](#console)
-- [检测模式](#detect-mode) · [实况图](#live-photo) · [归档与元数据](#archive) · [去重与状态](#dedupe)
+- [检测模式](#detect-mode) · [实况图](#live-photo) · [背景音乐](#bgm) · [失败兜底](#fallback) · [归档与元数据](#archive) · [去重与状态](#dedupe)
 - [本地缓存清理](#cache) · [配置说明](#config) · [推送到 Telegram](#tg-push) · [部署到 Ubuntu](#deploy)
 - [性能与资源](#performance) · [故障排查速查](#troubleshooting) · [常见问题](#faq)
 - [升级与回滚](#upgrade) · [开发与测试](#development) · [重要提示](#notes) · [技术细节](#tech) · [最近更新](#changelog)
@@ -68,6 +68,8 @@ pnpm docs:dev
 | 接口优先提取 | 直接读取私信消息接口中的 `itemId`，准确、无需点击视频卡片 |
 | 四层去重 | 消息指纹 + 链接指纹 + 视频 ID 指纹 + 文件内容 SHA-256；换链接/换账号重复转发也不会重复上传 |
 | 实况图支持 | 识别 `LivePhotoFile`，按 `video` / `live` / `both` / `comment` 四种模式推送；超限自动改发视频，`comment` 可把 Live Photo 发到评论区 |
+| 背景音乐归档 | 图片/图文/实况作品额外解析 `aweme_detail.music`，把 BGM 以音频消息发到对应帖的评论区，并记录 Telegram 消息位置；普通视频默认不发 |
+| 失败兜底 | 解析失败后把链接发到兜底群/频道，等待兜底 bot 出片；成功后删除链接。兜底 bot 把实况输出成视频时，可抽首帧转回 Live Photo |
 | Telegram 推送 | 视频带封面流式播放、图文相册、GIF、Live Photo；失败自动降级文档 |
 | 归档与元数据 | 原始媒体 + `metadata.json`（标题/作者/链接/媒体类型/实况图数量） |
 | 文件控制台 | 写 `agent_cmd.txt` 即可换昵称、切检测/实况图模式、填验证码、点登录菜单，免重启 |
@@ -660,6 +662,84 @@ Telegram 的 Live Photo 是「照片 + 视频」两个文件，**不需要** App
 只有要把文件导出到 iPhone 相册、让系统识别为 Apple Live Photo 时，才需要 JPEG+MOV 配对与元数据；`makelive` 是 macOS 专用，Linux 服务器需 `exiftool` / `ffmpeg` / `live-photo-conv`，本服务暂未包含。
 
 
+<a id="bgm"></a>
+
+## 背景音乐（BGM）评论区归档
+
+抖音的图片、图文和实况图作品通常带背景音乐，但 parsehub 的 `ParseResult` 只保留图片/视频引用，不暴露 `aweme_detail.music`。本服务在转发层补一次移动端详情请求，把 BGM 作为**独立音频消息**发到对应频道帖的评论区，而不是混进 Live Photo 视频。
+
+### 工作方式
+
+1. 解析流水线归档完成后，`forwarder/douyin_meta.py` 调 `DouyinMobileCrawler.parse()` 读取 `aweme_detail.music`（普通视频默认跳过这次详情请求，除非 `FORWARDER_BGM_ON_VIDEO=true`）；
+2. 如果媒体类型是图片/图文/实况，且 BGM 有可下载的 `play_url`，下载 mp3 到临时目录；
+3. 频道帖发出、拿到讨论组根消息后，先发 BGM（`sendAudio`，`reply_to_message_id=root`），再发该帖的 Live Photo；
+4. 上传成功立即删除临时 mp3（`FORWARDER_BGM_LOCAL_COPY=false` 时），`metadata.json` 记录 `music` 的标题、作者、时长、music_id、Telegram `chat_id/message_id/link`。
+
+BGM 放在评论区第一条，避免被十几张 Live Photo 埋掉。没有评论区、bot 不在讨论组、拿不到根消息或下载失败时只记日志，**不影响主媒体推送**。
+
+### 普通视频为什么不发
+
+普通视频本身已经包含声音，再发一条 BGM 会让评论区多一条重复音频。默认 `FORWARDER_BGM_ON_VIDEO=false`；需要时改为 `true`。
+
+### 配置项
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `FORWARDER_BGM_MODE` | `comment` | `comment` 开启评论区归档；`off` 完全关闭（不额外请求详情） |
+| `FORWARDER_BGM_ON_VIDEO` | `false` | 普通视频是否也发 BGM |
+| `FORWARDER_BGM_LOCAL_COPY` | `false` | 是否在 `forwarder_data/bgm/` 保留 mp3；默认上传后删除 |
+| `FORWARDER_BGM_MAX_MB` | `20` | 单个 BGM 最大体积 |
+| `FORWARDER_BGM_TIMEOUT` | `30` | 下载超时秒数 |
+
+### 实测与限制
+
+- 实测作品 `aweme_type=68`：`music.play_url.url_list[0]` 直接返回 `audio/mpeg`，无需 cookie；样本 260,645 字节、ID3 开头；
+- 实况视频自带的音轨在样本里是**静音占位**（mean/max volume 约 -91 dB），所以 BGM 不会通过 Live Photo 视频自动带出；
+- Telegram 的 `sendLivePhoto` 没有独立 audio 参数，本版本不做 BGM 混流（不引入 ffmpeg）；
+- BGM 只归档到对应帖子评论区，不在频道主帖单独发音频。
+
+<a id="fallback"></a>
+
+## 失败兜底（可选）
+
+解析最终失败（重试达到上限）后，可以把原始链接发到兜底群/频道，让另一个解析 bot 出片；成功后删除我们发的链接。该功能默认关闭，需要配置 `FORWARDER_FALLBACK_CHAT`。
+
+### 两种部署形态
+
+| `FORWARDER_FALLBACK_CHAT` | 行为 |
+| --- | --- |
+| 成品频道本身（如 `@xiadebz`） | 兜底 bot 的视频已经出现在成品频道；我们的 bot **不再复制视频**，只在该频道帖下补评论区 Live Photo |
+| 独立兜底群/频道 | 兜底 bot 出片后，把视频复制到成品频道，再在复制出的帖子下补评论区 Live Photo |
+
+### 兜底视频转 Live Photo
+
+兜底 bot（原项目）会把每张实况图输出成一条普通视频。对确认来源是实况图的作品，`forwarder/video_live.py` 用 OpenCV 读取视频第一帧作为静态图，原视频作为实况视频，复用现有 `send_live_photo`：
+
+- 视频必须 ≤ `FORWARDER_VIDEO_AS_LIVE_MAX_SECONDS`（默认 10 秒）、≤ `FORWARDER_VIDEO_AS_LIVE_MAX_MB`（默认 10MB）；
+- 超限、抽帧失败或 OpenCV 未安装 → 放弃转换，按普通视频处理（不会硬塞成 Live Photo）；
+- 只对 `media.kind=live` 的作品转换，避免把普通视频误转；
+- 不把 BGM 混入 Live Photo。
+
+### 配置项
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `FORWARDER_FALLBACK_CHAT` | 空 | 兜底群/频道；留空关闭。支持 `@username` 或 `-100...` |
+| `FORWARDER_FALLBACK_BOT` | `@ParseHubot` | 兜底 bot 用户名；用于识别它的出片 |
+| `FORWARDER_FALLBACK_TIMEOUT` | `180` | 等待出片秒数；超时保留链接并私聊通知 owner |
+| `FORWARDER_FALLBACK_DELETE_LINK` | `true` | 成功后是否删除我们发的链接 |
+| `FORWARDER_FALLBACK_MARKER` | `#fallback` | 链接消息前缀，便于人工识别 |
+| `FORWARDER_VIDEO_AS_LIVE` | `true` | 是否把兜底实况视频转回 Live Photo |
+| `FORWARDER_VIDEO_AS_LIVE_MAX_SECONDS` | `10` | 转换的最大秒数 |
+| `FORWARDER_VIDEO_AS_LIVE_MAX_MB` | `10` | 转换的最大体积 |
+
+### 已知限制
+
+- **最大风险是消息可见性**：Telegram Bot API 不保证 bot 能收到另一个 bot 在群里发的消息；频道 `channel_post` 通常可收到，群聊里经常收不到。若日志一直看不到兜底 bot 的出片，需要改用用户账号监听，或把兜底 bot 放在频道里；
+- 兜底群必须是我们的 bot 已加入、且能发言的 chat；成品频道需要开启评论区并把 bot 拉进关联讨论组；
+- 超时只在 `FORWARDER_FALLBACK_TIMEOUT` 后通知 owner，不自动删除链接，方便人工处理；
+- 同一个作品可能有多条视频；当前按消息逐条处理，每条视频单独复制/补评论。
+
 <a id="archive"></a>
 
 ## 归档与元数据
@@ -697,6 +777,7 @@ output/
 | `video_key` | 作品 ID（用于目录命名/排查） |
 | `content_hash` | 最大媒体文件 SHA-256（内容级去重） |
 | `media` | 实际归档文件列表（文件名 + 字节数） |
+| `music` | BGM 元数据（标题/作者/时长/music_id/封面 URL/抖音下载地址）；成功发到评论区后额外含 `telegram.chat_id/message_id/link`；失败含 `error` |
 | `archived_at` | 归档时间（带时区） |
 
 > 实况图示例：`media_count=14`、`live_photo_count=14`、`media` 里有 **28** 个文件（14 jpg + 14 mp4）。
@@ -850,6 +931,29 @@ rm -rf forwarder_data/browser_profile
 | `FORWARDER_LIVE_PHOTO_MAX_MB` | `10` | 实况视频最大 MB，超过改发视频 |
 | `FORWARDER_LIVE_PHOTO_MAX_ITEMS` | `10` | 只对 `live`/`both` 生效：超过该值回退视频；`0` = 不限；`comment` 不生效 |
 | `FORWARDER_LIVE_PHOTO_SEND_INTERVAL` | `2.0` | 逐条发送实况图之间的间隔秒数；`0` = 不等待 |
+
+#### 背景音乐（BGM）
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `FORWARDER_BGM_MODE` | `comment` | `comment`：图片/图文/实况的 BGM 发到对应帖评论区；`off`：关闭 |
+| `FORWARDER_BGM_ON_VIDEO` | `false` | 普通视频是否也发 BGM（默认不发，视频自带声音） |
+| `FORWARDER_BGM_LOCAL_COPY` | `false` | 是否保留 mp3 到 `forwarder_data/bgm/`；默认上传后删除 |
+| `FORWARDER_BGM_MAX_MB` | `20` | 单个 BGM 最大体积 |
+| `FORWARDER_BGM_TIMEOUT` | `30` | BGM 下载超时（秒） |
+
+#### 失败兜底
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `FORWARDER_FALLBACK_CHAT` | 空 | 兜底群/频道（`@username` / `-100...`）；留空关闭 |
+| `FORWARDER_FALLBACK_BOT` | `@ParseHubot` | 兜底 bot 用户名，用于识别出片 |
+| `FORWARDER_FALLBACK_TIMEOUT` | `180` | 等待出片秒数；超时保留链接并通知 owner |
+| `FORWARDER_FALLBACK_DELETE_LINK` | `true` | 成功后删除我们发的链接 |
+| `FORWARDER_FALLBACK_MARKER` | `#fallback` | 链接消息前缀 |
+| `FORWARDER_VIDEO_AS_LIVE` | `true` | 兜底实况视频是否转回 Live Photo |
+| `FORWARDER_VIDEO_AS_LIVE_MAX_SECONDS` | `10` | 转换最大秒数 |
+| `FORWARDER_VIDEO_AS_LIVE_MAX_MB` | `10` | 转换最大体积 |
 
 #### 解析 / 归档 / 清理
 
@@ -1122,12 +1226,16 @@ sudo systemctl start douyin-forward
 | [forwarder/tg_push.py](forwarder/tg_push.py) | 构建并发送 Telegram 媒体（含 Live Photo 分支） |
 | [forwarder/main.py](forwarder/main.py) | 服务主循环、解析重试、缓存清理 |
 | [forwarder/config.py](forwarder/config.py) | 环境变量配置与模式规范化 |
+| [forwarder/douyin_meta.py](forwarder/douyin_meta.py) | 抖音详情补全：BGM 提取/下载、媒体类型判断 |
+| [forwarder/video_live.py](forwarder/video_live.py) | 兜底视频抽第一帧，转换为 Live Photo 对 |
+| [forwarder/fallback.py](forwarder/fallback.py) | 失败链接兜底群、兜底 bot 消息监听与媒体转存 |
 | [run.py](run.py) | 统一入口与 bootstrap（chdir / 注入占位环境变量 / sys.path） |
 
 ### 本地检查
 
 ```bash
 python -m compileall -q forwarder run.py
+python -m unittest tests.test_features -v   # 新功能离线测试（不需要 Telegram/parsehub）
 python run.py doctor
 python run.py test-url "https://v.douyin.com/xxxxxxx/" --no-download
 python run.py serve --once
@@ -1149,7 +1257,7 @@ bash -n deploy/*.sh
 - 下载后应为 `LivePhotoFile`（jpg + mp4），归档目录同时出现两种文件；
 - 若只看到视频，检查 `FORWARDER_LIVE_PHOTO_MODE` 是否为 `video`，以及启动日志中的实况图模式。
 
-> 当前仓库未内置 pytest 套件；以上命令 + `serve --once` 日志是最小回归路径。如需自动化，可在 `forwarder/tests/` 下补充单元测试。
+> `tests/test_features.py` 覆盖 BGM 元数据/发送决策、视频转 Live Photo、兜底消息识别、归档 metadata 更新与评论根并发等待；`serve --once` 日志仍是最小端到端回归路径。
 
 ---
 

@@ -3,7 +3,7 @@ layout: home
 
 hero:
   name: 抖音转发解析
-  text: 视频 · 图文 · 实况图
+  text: 视频 · 图文 · 实况图 · BGM
   tagline: 基于 parse_hub_bot 的抖音私信转发解析服务；自动接收、解析、归档，并推送到 Telegram。
   image:
     src: /logo.svg
@@ -31,10 +31,13 @@ features:
     details: 识别 LivePhotoFile，按 video / live / both / comment 四种模式推送。
   - icon: 🗂️
     title: 归档与去重
-    details: 原始媒体 + metadata.json；消息/链接/视频 ID/内容哈希四层去重。
+    details: 原始媒体 + metadata.json；BGM 归档到评论区；四层去重。
   - icon: 📨
     title: Telegram 推送
     details: 视频、图文相册、GIF、Live Photo；失败自动降级文档。
+  - icon: 🪂
+    title: 失败兜底
+    details: 解析失败转发到兜底群，成功接回并删除链接；兜底视频可还原成 Live Photo。
   - icon: 🛠️
     title: 部署友好
     details: 一键 Ubuntu 脚本 + systemd + 交互式配置。
@@ -46,5 +49,7 @@ features:
 - [快速开始](/guide/getting-started) — 10 分钟跑起来
 - [检测模式](/guide/detection) — reload 与 probe 怎么选
 - [实况图](/guide/live-photo) — Live Photo 四种模式与限制
+- [背景音乐](/guide/bgm) — BGM 归档到评论区
+- [失败兜底](/guide/fallback) — 兜底群与 Live Photo 还原
 - [部署到 Ubuntu](/guide/deploy) — 服务器一键部署
 - [常见问题](/guide/faq) — 先看这里

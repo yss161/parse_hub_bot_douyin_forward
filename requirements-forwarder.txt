@@ -43,6 +43,8 @@ winloop>=0.3.1 ; sys_platform == "win32"
 
 # ---- 转发链路新增依赖 ----
 playwright>=1.40
+# 兜底视频转 Live Photo 抽第一帧（可选功能；不装则自动跳过转换，按普通视频处理）
+opencv-python-headless>=4.8
 # Telegram MTProto AES-IGE 加速（C 后端）；没有它时 fast_aes 会退回 pyaes。
 cryptography>=41.0
 

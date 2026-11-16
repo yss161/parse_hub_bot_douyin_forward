@@ -1,6 +1,6 @@
 ---
 title: 常见问题
-description: 抖音转发解析服务常见问题：登录、消息、解析、实况图、检测模式与升级。
+description: 抖音转发解析服务常见问题：登录、消息、解析、实况图、BGM、兜底、检测模式与升级。
 outline: deep
 ---
 
@@ -97,7 +97,7 @@ tgcrypto 只有 C 源码包，新版 Python 无预编译轮子，容易装失败
 
 ## 升级后默认行为会变吗？
 
-不会。检测模式默认 `reload`、实况图模式默认 `video`，新配置项都有默认值，旧 `.env` 不用改。
+检测模式默认 `reload`、实况图模式默认 `video`，这两项不变。但新版本 **BGM 归档默认开启**（`FORWARDER_BGM_MODE=comment`）：图片、图文、实况图的背景音乐会被发到对应帖子的评论区，每个作品会多一次详情请求（约 5～7 秒）。不想改变旧行为就设 `FORWARDER_BGM_MODE=off`。失败兜底默认关闭（`FORWARDER_FALLBACK_CHAT` 为空）。
 
 ## 为什么实况图没有相册，是一条条发？
 
@@ -118,3 +118,19 @@ Telegram Bot API 的 `sendMediaGroup` 不支持 Live Photo，只能逐条 `sendL
 ## comment 模式需要什么前置条件？
 
 频道必须开启评论区并关联讨论组；bot 必须加入该讨论组且有发言权限（建议管理员）。bot 不能调用 `messages.GetDiscussionMessage`，评论根依赖讨论组自动转发；等待超时会跳过评论，但频道媒体已正常发送。
+
+## BGM 为什么发在评论区，而不是和图片一起？
+
+Telegram 没有「图片 + 背景音乐」的组合消息，音频只能单独发送。放在对应帖的评论区，既不打断频道主帖的图集，又能保留 BGM；BGM 是评论区第一条，实况图排在其后。详见[背景音乐归档](/guide/bgm)。
+
+## 普通视频为什么没有 BGM？
+
+视频本身已经包含声音，默认不再单独发一次 BGM。确需归档时设 `FORWARDER_BGM_ON_VIDEO=true`。
+
+## 开启了失败兜底，为什么兜底 bot 出片后没反应？
+
+最常见原因是 **bot 收不到其他 bot 的群消息**：Telegram Bot API 不保证这类更新，普通群尤其明显。可尝试让兜底 bot 发频道帖（`channel_post`）、使用专用用户账号监听，或轮询公开频道预览。其次确认 `FORWARDER_FALLBACK_CHAT` 的 ID 正确、bot 在群内、`FORWARDER_FALLBACK_BOT` 用户名没写错。日志里搜 `兜底`。详见[失败兜底](/guide/fallback#前置条件与风险)。
+
+## 兜底视频会被转成 Live Photo 吗？
+
+只有确认原链接是实况图（`aweme_type=68` / `images[].video`）、且视频 ≤10 秒/≤10MB 时才会转：用 OpenCV 抽第一帧作静态图，原视频作实况视频。普通视频不会误转；超限或没装 OpenCV 时按普通视频处理。

@@ -54,6 +54,8 @@ export default defineConfig({
           items: [
             { text: '检测模式', link: '/guide/detection' },
             { text: '实况图（Live Photo）', link: '/guide/live-photo' },
+            { text: '背景音乐（BGM）', link: '/guide/bgm' },
+            { text: '失败兜底', link: '/guide/fallback' },
             { text: '归档与去重', link: '/guide/archive' },
             { text: 'Bot 控制台', link: '/guide/console' },
             { text: 'Telegram 推送', link: '/guide/telegram' }

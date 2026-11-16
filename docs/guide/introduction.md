@@ -40,6 +40,9 @@ outline: deep
 | 接口优先提取 | 直接读取私信消息接口中的 `itemId`，准确、无需点击视频卡片 |
 | 四层去重 | 消息指纹 + 链接指纹 + 视频 ID 指纹 + 内容 SHA-256；换链接/换作品 ID 重复转发也不会重复下载 |
 | 实况图支持 | 识别 `LivePhotoFile`，按 `video` / `live` / `both` / `comment` 四种模式推送；超限自动改发视频，`comment` 可把 Live Photo 发到评论区 |
+| BGM 归档 | 图片/图文/实况的背景音乐下载后发到对应帖评论区；普通视频默认不发（视频自带声音） |
+| 失败兜底 | 最终解析失败时把链接转发到兜底群，识别兜底 bot 出片并接回频道，成功后删除链接 |
+| 兜底还原 Live Photo | 兜底 bot 把实况输出成视频时，用 OpenCV 抽第一帧作静态图，还原成 Telegram Live Photo（超限回退视频） |
 | Telegram 推送 | 视频带封面流式播放、图文相册、GIF、Live Photo；失败自动降级文档 |
 | 归档与元数据 | 原始媒体 + `metadata.json`（标题/作者/链接/媒体类型/实况图数量） |
 | 文件控制台 | 写 `agent_cmd.txt` 即可换昵称、切检测/实况图模式、填验证码、点登录菜单，免重启 |
@@ -71,7 +74,11 @@ outline: deep
              ↓
        TgPusher：视频 / 图片相册 / GIF / Live Photo（按模式）
              ↓
+       BGM：图片/图文/实况 → 对应帖评论区；实况图在后
+             ↓
        推送成功后按配置删除本地归档；SQLite 记录归档/消息 ID/统计
+             ↓
+       最终失败 → 兜底群链接 → 兜底 bot 出片 → 接回频道（实况可还原 Live Photo）
              ↓
        Owner 控制台：/status /stats /last /failures /retry /search；每日摘要/告警
 ```
@@ -85,7 +92,9 @@ outline: deep
 | 解析桥接 | `forwarder/parser_bridge.py` |
 | 归档 | `forwarder/archive.py` |
 | 去重 / 水位 | `forwarder/state.py` |
-| Telegram 推送 | `forwarder/tg_push.py` |
+| Telegram 推送 / BGM 评论区 | `forwarder/tg_push.py` |
+| BGM 与媒体类型探测 | `forwarder/douyin_meta.py` |
+| 兜底群 / 兜底视频 | `forwarder/fallback.py`、`forwarder/video_live.py` |
 | 服务主循环 / 队列 / 缓存清理 | `forwarder/main.py` |
 | Bot 控制台 / 失败卡片 | `forwarder/control.py` |
 | 失败分类 / 退避 | `forwarder/failures.py`、`forwarder/state.py` |
@@ -122,5 +131,7 @@ git -C parse_hub_bot status --porcelain
 - [快速开始](/guide/getting-started) — 安装、登录、启动
 - [检测模式](/guide/detection) — reload 与 probe 怎么选
 - [实况图](/guide/live-photo) — Live Photo 四种模式
+- [背景音乐](/guide/bgm) — BGM 评论区归档
+- [失败兜底](/guide/fallback) — 兜底群与 Live Photo 还原
 - [Bot 控制台](/guide/console) — 绑定 owner、远程运维
 - [完整配置](/guide/configuration) — 所有环境变量

@@ -30,6 +30,7 @@ from parsehub.types import AnyParseResult
 from services import ParsePipeline, ParseService
 
 from .archive import ArchiveResult, archive_result
+from .douyin_meta import fetch_douyin_meta
 from .reporter import LogStatusReporter
 
 logger = logger.bind(name="Forwarder/Bridge")
@@ -50,6 +51,20 @@ class ParseOutcome:
     push_ok: bool | None = None
     # 内容级重复：归档文件的哈希已存在（不再推送，由调用方决定是否删除重复归档目录）
     duplicate: bool = False
+    # 抖音附加信息：{"music": {...}, "media": {"kind": "live|image|video|unknown", ...}}
+    meta: dict[str, Any] | None = None
+
+
+def _video_only(parse_result: Any) -> bool:
+    """纯视频作品无需 BGM 详情请求（普通视频默认不发 BGM）。"""
+    try:
+        from parsehub.types import VideoRef
+        from utils.helpers import to_list
+
+        refs = to_list(getattr(parse_result, "media", None))
+        return bool(refs) and all(isinstance(ref, VideoRef) for ref in refs)
+    except Exception:
+        return False
 
 
 def _default_locale_selector():
@@ -70,8 +85,10 @@ async def parse_url(
     skip_media_processing: bool = True,
     reporter: LogStatusReporter | None = None,
     download: bool = True,
-    on_files_ready: Callable[[Any], Awaitable[bool | None]] | None = None,
+    on_files_ready: Callable[[Any, dict[str, Any] | None], Awaitable[bool | None]] | None = None,
     is_duplicate: Callable[[str], bool] | None = None,
+    fetch_meta: bool = False,
+    meta_on_video: bool = True,
 ) -> ParseOutcome:
     """用原项目的解析链路处理一个链接。
 
@@ -151,10 +168,15 @@ async def parse_url(
                 except Exception as e:
                     logger.warning(f"内容去重检查失败（继续推送）: {e}")
 
+            # 可选：读取 BGM/媒体类型（只多一次移动端详情请求；失败不影响主流程）
+            # 普通视频默认不发 BGM，跳过这次请求以节省解析时间。
+            if fetch_meta and (meta_on_video or not _video_only(result.parse_result)):
+                outcome.meta = await fetch_douyin_meta(outcome.raw_url or url)
+
             # 可选：归档完成后的后续动作（此刻归档文件与临时文件都有效，供推送使用）
             if on_files_ready is not None:
                 try:
-                    outcome.push_ok = bool(await on_files_ready(result))
+                    outcome.push_ok = bool(await on_files_ready(result, outcome.meta))
                 except Exception as e:
                     logger.error(f"归档后回调异常: {e}")
                     outcome.push_ok = False

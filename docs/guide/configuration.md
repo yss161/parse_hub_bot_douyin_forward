@@ -48,6 +48,33 @@ outline: deep
 | `FORWARDER_LIVE_PHOTO_MAX_ITEMS` | `10` | 只对 `live`/`both` 生效：超过该值回退视频；`0` = 不限；`comment` 不生效 |
 | `FORWARDER_LIVE_PHOTO_SEND_INTERVAL` | `2.0` | 逐条发送实况图的间隔（秒）；`0` = 不等待；用于降低连续上传触发限流的概率 |
 
+## 背景音乐（BGM）
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `FORWARDER_BGM_MODE` | `comment` | `comment`：图片/图文/实况的 BGM 发到对应帖评论区；`off`：关闭 |
+| `FORWARDER_BGM_ON_VIDEO` | `false` | 普通视频是否也发 BGM（默认不发，视频自带声音） |
+| `FORWARDER_BGM_LOCAL_COPY` | `false` | 是否保留 mp3 到 `forwarder_data/bgm/`；默认上传后删除 |
+| `FORWARDER_BGM_MAX_MB` | `20` | 单个 BGM 最大体积 |
+| `FORWARDER_BGM_TIMEOUT` | `30` | BGM 下载超时（秒） |
+
+详见[背景音乐归档](/guide/bgm)。
+
+## 失败兜底
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `FORWARDER_FALLBACK_CHAT` | 空 | 兜底群/频道（`@username` / `-100...`）；留空关闭 |
+| `FORWARDER_FALLBACK_BOT` | `@ParseHubot` | 兜底 bot 用户名，用于识别出片 |
+| `FORWARDER_FALLBACK_TIMEOUT` | `180` | 等待出片秒数；超时保留链接并私聊 owner |
+| `FORWARDER_FALLBACK_DELETE_LINK` | `true` | 成功后删除我们发的链接 |
+| `FORWARDER_FALLBACK_MARKER` | `#fallback` | 链接消息前缀 |
+| `FORWARDER_VIDEO_AS_LIVE` | `true` | 兜底实况视频是否还原成 Live Photo |
+| `FORWARDER_VIDEO_AS_LIVE_MAX_SECONDS` | `10` | 转换最大秒数 |
+| `FORWARDER_VIDEO_AS_LIVE_MAX_MB` | `10` | 转换最大体积 |
+
+详见[失败兜底](/guide/fallback)。
+
 ## 解析 / 归档 / 清理
 
 | 变量 | 默认 | 说明 |
@@ -144,6 +171,15 @@ DOUYIN_FORCE_FETCH_INTERVAL=45
 # 实况图（默认 video；想发 Live Photo 选 live / both；频道+评论区选 comment）
 FORWARDER_LIVE_PHOTO_MODE=comment
 FORWARDER_LIVE_PHOTO_SEND_INTERVAL=2.0
+
+# BGM 归档（图片/图文/实况发评论区；普通视频默认不发）
+FORWARDER_BGM_MODE=comment
+FORWARDER_BGM_ON_VIDEO=false
+
+# 失败兜底（不需要就留空）
+FORWARDER_FALLBACK_CHAT=
+FORWARDER_FALLBACK_BOT=@ParseHubot
+FORWARDER_VIDEO_AS_LIVE=true
 
 # Telegram 推送
 TG_PUSH=true

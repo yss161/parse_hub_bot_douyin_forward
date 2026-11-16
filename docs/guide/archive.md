@@ -24,7 +24,8 @@ output/
 - 目录名：`<时间戳>_<作品ID>`；
 - 普通视频：mp4 + `metadata.json`；
 - 图文/图集：多张图片 + `metadata.json`；
-- **实况图**：每张同时归档 `xxx.jpg` + `xxx_video.mp4`。
+- **实况图**：每张同时归档 `xxx.jpg` + `xxx_video.mp4`；
+- **BGM**：默认只作为 Telegram 评论区音频归档，不落本地；`FORWARDER_BGM_LOCAL_COPY=true` 时另存到 `forwarder_data/bgm/`。
 
 ## metadata.json
 
@@ -41,9 +42,12 @@ output/
 | `video_key` | 作品 ID |
 | `content_hash` | 最大媒体文件 SHA-256（内容级去重） |
 | `media` | 实际归档文件列表（文件名 + 字节数） |
+| `music` | BGM 信息（标题/作者/时长/来源/封面/Telegram 消息位置）；无 BGM 或未解析时不写 |
 | `archived_at` | 归档时间（带时区） |
 
 > 实况图示例：`media_count=14`、`live_photo_count=14`、`media` 里 28 个文件（14 jpg + 14 mp4）。
+>
+> BGM 示例：`music.title`、`music.author`、`music.duration`、`music.telegram.message_id`；详见[背景音乐归档](/guide/bgm#metadata-json)。
 
 ## 四层去重
 

@@ -57,6 +57,11 @@ class PushResult:
     chat_id: int | None = None
     message_id: int | None = None
     link: str = ""
+    # BGM：解析到的音乐信息（含 telegram 消息位置）；bgm_sent 表示是否真正上传成功
+    music: dict[str, Any] | None = None
+    bgm_sent: bool = False
+    bgm_message_id: int | None = None
+    bgm_link: str = ""
 
 
 class TgPusher:
@@ -80,8 +85,13 @@ class TgPusher:
         # 频道帖 ID -> 讨论组里的自动转发消息 ID（即评论根消息）
         self._forward_cache: dict[int, int] = {}
         # 正在等待某几个频道帖的自动转发；同一时间只允许一个评论任务
-        self._forward_waiter: tuple[set[int], asyncio.Future] | None = None
+        # 允许多个任务同时等待不同频道帖的评论根（推送 + 兜底可能并发）
+        self._forward_waiters: list[tuple[set[int], asyncio.Future]] = []
         self._discussion_lock = asyncio.Lock()
+        # BGM 评论区归档：每个作品最多尝试一次，避免回退路径重复发送
+        self._bgm_attempted = False
+        self._bgm_music: dict[str, Any] | None = None
+        self._bgm_message: Any = None
 
     @property
     def effective_live_photo_mode(self) -> str:
@@ -291,9 +301,7 @@ class TgPusher:
             for old in list(self._forward_cache)[:100]:
                 self._forward_cache.pop(old, None)
 
-        waiter = self._forward_waiter
-        if waiter is not None:
-            wanted, future = waiter
+        for wanted, future in list(self._forward_waiters):
             if post_id in wanted and not future.done():
                 future.set_result(int(message.id))
 
@@ -304,7 +312,8 @@ class TgPusher:
             return None
 
         future = asyncio.get_running_loop().create_future()
-        self._forward_waiter = (wanted, future)
+        waiter = (wanted, future)
+        self._forward_waiters.append(waiter)
         try:
             for post_id in wanted:
                 if post_id in self._forward_cache:
@@ -317,8 +326,10 @@ class TgPusher:
             )
             return None
         finally:
-            if self._forward_waiter is not None and self._forward_waiter[1] is future:
-                self._forward_waiter = None
+            try:
+                self._forward_waiters.remove(waiter)
+            except ValueError:
+                pass
 
     async def stop(self) -> None:
         if self._cli is not None:
@@ -346,18 +357,26 @@ class TgPusher:
         )
         return caption, photos_videos, animations
 
-    async def push(self, parse_result: Any, processed_list: list) -> PushResult:
+    async def push(
+        self, parse_result: Any, processed_list: list, meta: dict[str, Any] | None = None
+    ) -> PushResult:
         """推送一次解析结果，返回首条消息（用于记录 message_id / 评论定位）。"""
         self._last_message = None
+        self._bgm_attempted = False
+        self._bgm_music = None
+        self._bgm_message = None
         if not self.enabled or self._cli is None:
             return PushResult(ok=True)
+        if meta and isinstance(meta.get("music"), dict):
+            # 无论最终能否发到评论区，都先保留 BGM 信息，供 metadata.json 记录
+            self._bgm_music = dict(meta["music"])
 
         mode = self.effective_live_photo_mode
         live_count = self._live_photo_count(processed_list)
         ok = True
         if mode == "comment" and live_count > 0:
             try:
-                ok = await self._push_comment(parse_result, processed_list)
+                ok = await self._push_comment(parse_result, processed_list, meta=meta)
             except Exception as e:
                 logger.warning(f"评论模式推送失败（{e}），回退为普通视频推送")
                 await self._push_normal(parse_result, processed_list)
@@ -377,6 +396,10 @@ class TgPusher:
         else:
             await self._push_normal(parse_result, processed_list)
 
+        # 非评论模式：媒体发完后，等频道帖的讨论组根消息，再把 BGM 发到评论区。
+        if not self._bgm_attempted:
+            await self._send_bgm_after_media(parse_result, processed_list, meta)
+
         ok = bool(ok)
         message = self._last_message
         if message is None and ok:
@@ -387,6 +410,10 @@ class TgPusher:
             chat_id=int(getattr(getattr(message, "chat", None), "id", 0) or 0) or None,
             message_id=int(getattr(message, "id", 0) or 0) or None,
             link=self.message_link(message),
+            music=self._bgm_music,
+            bgm_sent=self._bgm_message is not None,
+            bgm_message_id=int(getattr(self._bgm_message, "id", 0) or 0) or None,
+            bgm_link=self.message_link(self._bgm_message),
         )
 
     def _remember(self, message: Any) -> Any:
@@ -525,7 +552,9 @@ class TgPusher:
             return False
         return True
 
-    async def _push_comment(self, parse_result: Any, processed_list: list) -> bool:
+    async def _push_comment(
+        self, parse_result: Any, processed_list: list, meta: dict[str, Any] | None = None
+    ) -> bool:
         """评论模式：频道发视频/相册，Live Photo 逐条发到该帖评论区。
 
         - 频道优先把解析出的视频（LivePhotoFile 会被 build_input_media 映射成视频）
@@ -585,8 +614,12 @@ class TgPusher:
                     f"频道已发送（消息 {channel_message.id}），但未拿到讨论组根消息；"
                     "本次评论区跳过，不回退重发"
                 )
+                self._bgm_attempted = True
                 logger.success(f"已推送至 Telegram: {self._target_name}")
                 return True
+
+            # BGM 放在评论区的第一条，避免被十几张 Live Photo 埋掉。
+            await self._send_bgm_for_root(parse_result, processed_list, meta, root_id)
 
             sent = 0
             failed = 0
@@ -696,6 +729,125 @@ class TgPusher:
             logger.warning(f"实况图推送完成，但有 {failed} 项失败（已尽量回退视频）")
         logger.success(f"已推送至 Telegram: {self._target_name}")
         return True
+
+    # ────────────── BGM 评论区归档 ──────────────
+
+    @staticmethod
+    def _refs_are_video_only(parse_result: Any) -> bool:
+        try:
+            from parsehub.types import VideoRef
+            from utils.helpers import to_list
+
+            refs = to_list(parse_result.media)
+            return bool(refs) and all(isinstance(ref, VideoRef) for ref in refs)
+        except Exception:
+            return False
+
+    def _should_send_bgm(
+        self, parse_result: Any, processed_list: list, meta: dict[str, Any] | None
+    ) -> bool:
+        if self.settings.normalized_bgm_mode() != "comment":
+            return False
+        music = (meta or {}).get("music")
+        if not isinstance(music, dict) or not music.get("url"):
+            return False
+        media = (meta or {}).get("media") or {}
+        kind = str(media.get("kind") or "") if isinstance(media, dict) else ""
+        if kind == "video":
+            return bool(self.settings.bgm_on_video)
+        if not kind and self._refs_are_video_only(parse_result):
+            return bool(self.settings.bgm_on_video)
+        return True
+
+    @staticmethod
+    def _bgm_caption(music: dict[str, Any]) -> str:
+        title = str(music.get("title") or "").strip()
+        author = str(music.get("author") or "").strip()
+        if title and author:
+            return _clip(f"BGM：{title} - {author}")
+        if title:
+            return _clip(f"BGM：{title}")
+        if author:
+            return _clip(f"BGM：{author}")
+        return "BGM"
+
+    async def _send_bgm_after_media(
+        self, parse_result: Any, processed_list: list, meta: dict[str, Any] | None
+    ) -> None:
+        if not self._should_send_bgm(parse_result, processed_list, meta):
+            return
+        message = self._last_message
+        if message is None:
+            logger.warning("没有频道消息，无法定位评论区根消息；跳过 BGM 归档")
+            self._bgm_attempted = True
+            return
+        root_id = await self._wait_discussion_root([int(getattr(message, "id", 0) or 0)])
+        if root_id is None:
+            self._bgm_attempted = True
+            return
+        await self._send_bgm_for_root(parse_result, processed_list, meta, root_id)
+
+    async def _send_bgm_for_root(
+        self,
+        parse_result: Any,
+        processed_list: list,
+        meta: dict[str, Any] | None,
+        root_id: int,
+    ) -> None:
+        if self._bgm_attempted:
+            return
+        if not self._should_send_bgm(parse_result, processed_list, meta):
+            return
+        self._bgm_attempted = True
+        if not self._discussion_group_id:
+            logger.info("目标频道没有关联讨论组，跳过 BGM 评论区归档")
+            return
+
+        music = self._bgm_music or dict((meta or {}).get("music") or {})
+        self._bgm_music = music
+        temp_path: Path | None = None
+        keep_local = bool(self.settings.bgm_local_copy)
+        try:
+            from .douyin_meta import download_music
+
+            dest = (self.settings.data_dir / "bgm") if keep_local else (self.settings.data_dir / "tmp")
+            temp_path = await download_music(
+                music,
+                dest,
+                max_mb=self.settings.bgm_max_mb,
+                timeout=self.settings.bgm_timeout,
+            )
+            music["file_name"] = temp_path.name
+            if keep_local:
+                music["local_path"] = str(temp_path)
+            message = await self._cli.send_audio(
+                self._discussion_group_id,
+                str(temp_path),
+                caption=self._bgm_caption(music),
+                title=str(music.get("title") or "") or None,
+                performer=str(music.get("author") or "") or None,
+                duration=int(music.get("duration") or 0),
+                reply_to_message_id=root_id,
+            )
+            self._bgm_message = message
+            music["telegram"] = {
+                "chat_id": int(getattr(getattr(message, "chat", None), "id", 0) or 0) or None,
+                "message_id": int(getattr(message, "id", 0) or 0) or None,
+                "link": self.message_link(message),
+            }
+            logger.success(
+                f"BGM 已归档到评论区: {music.get('title') or '-'} "
+                f"（消息 {getattr(message, 'id', '?')}）"
+            )
+        except Exception as e:
+            music["error"] = str(e)[:300]
+            logger.warning(f"BGM 评论区归档失败（不影响主推送）: {e}")
+        finally:
+            if temp_path is not None and not keep_local:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     async def _send_live(
         self,
