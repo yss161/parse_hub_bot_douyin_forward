@@ -107,9 +107,8 @@ class FallbackService:
             except Exception as e:
                 logger.warning(f"处理兜底消息异常（忽略）: {e}")
 
-        # 频道帖和普通消息在 Pyrogram 里是两个入口；两处都注册，靠 _seen 去重。
+        # kurigram 2.2.26 没有 on_channel_post；频道帖也通过 on_message 分发。
         self._cli.on_message(filters.chat(self._chat_id))(_on_fallback_message)
-        self._cli.on_channel_post(filters.chat(self._chat_id))(_on_fallback_message)
 
         self.enabled = True
         self._watch_task = asyncio.create_task(self._watch_timeouts(), name="fallback-watch")
