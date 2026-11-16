@@ -120,6 +120,7 @@ class FallbackService:
         self._cli.on_message(filters.chat(self._chat_id))(_on_fallback_message)
 
         self.enabled = True
+        await self._cleanup_stale_links()
         self._watch_task = asyncio.create_task(self._watch_timeouts(), name="fallback-watch")
         self._replay_task = asyncio.create_task(
             self._watch_replay_requests(), name="fallback-replay-watch"
@@ -136,6 +137,32 @@ class FallbackService:
         self._watch_task = None
         self._replay_task = None
         self.enabled = False
+
+    async def _cleanup_stale_links(self, limit: int = 200) -> int:
+        """清理频道里历史残留的 #fallback 链接（只删本 bot 发出的消息）。"""
+        marker = (self.settings.fallback_marker or "#fallback").strip()
+        if not marker or self._cli is None or self._chat_id is None:
+            return 0
+        deleted = 0
+        try:
+            async for message in self._cli.get_chat_history(self._chat_id, limit=limit):
+                text = str(getattr(message, "text", "") or getattr(message, "caption", "") or "")
+                if marker not in text or "douyin.com" not in text:
+                    continue
+                sender = getattr(message, "from_user", None)
+                sender_id = int(getattr(sender, "id", 0) or 0)
+                if self._self_id and sender_id != self._self_id:
+                    continue
+                try:
+                    await self._cli.delete_messages(self._chat_id, int(message.id))
+                    deleted += 1
+                except Exception as e:
+                    logger.warning(f"清理历史兜底链接失败（消息 {message.id}）: {e}")
+        except Exception as e:
+            logger.warning(f"扫描历史兜底链接失败（忽略）: {e}")
+        if deleted:
+            logger.info(f"已清理历史残留兜底链接 {deleted} 条")
+        return deleted
 
     async def submit(
         self,

@@ -704,7 +704,7 @@ BGM 放在评论区第一条，避免被十几张 Live Photo 埋掉。没有评�
 
 解析最终失败（重试达到上限）后，可以把原始链接发到兜底群/频道，让另一个解析 bot 出片；成功后删除我们发的链接。该功能默认关闭，需要配置 `FORWARDER_FALLBACK_CHAT`。
 
-发送前会先查一次抖音详情：作品已被删除、仅自己可见或明确不可用时**不会发兜底**（换解析 bot 也拿不到），失败记录会标记为 `unavailable`。只有仍可能解析的失败（地区版权、接口临时失败等）才进入兜底。
+发送前会先查一次抖音详情：作品已被删除、仅自己可见或明确不可用时**不会发兜底**（换解析 bot 也拿不到），失败记录会标记为 `unavailable`。只有仍可能解析的失败（地区版权、接口临时失败等）才进入兜底。服务启动时会扫描最近 200 条频道消息，清理本 bot 发出的历史残留 `#fallback` 链接（例如服务重启前已超时、但还没删除的链接）。
 
 ### 两种部署形态
 
@@ -965,7 +965,7 @@ rm -rf forwarder_data/browser_profile
 | --- | --- | --- |
 | `FORWARDER_FALLBACK_CHAT` | 空 | 兜底群/频道（`@username` / `-100...`）；留空关闭 |
 | `FORWARDER_FALLBACK_BOT` | `@ParseHubot` | 兜底 bot 用户名，用于识别出片 |
-| `FORWARDER_FALLBACK_TIMEOUT` | `180` | 等待出片秒数；超时保留链接并通知 owner |
+| `FORWARDER_FALLBACK_TIMEOUT` | `180` | 等待出片秒数；超时删除频道链接，只在 owner 私信保留原始链接 |
 | `FORWARDER_FALLBACK_DELETE_LINK` | `true` | 成功后删除我们发的链接 |
 | `FORWARDER_FALLBACK_MARKER` | `#fallback` | 链接消息前缀 |
 | `FORWARDER_VIDEO_AS_LIVE` | `true` | 兜底实况视频是否转回 Live Photo |

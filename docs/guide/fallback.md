@@ -136,4 +136,4 @@ journalctl -u douyin-forward -f | grep -i fallback
 FORWARDER_FALLBACK_CHAT=
 ```
 
-重启后不再启动监听，也不会发送任何兜底链接；服务停止期间已发出的链接不会自动清理，可手动删除。
+重启后不再启动监听，也不会发送任何兜底链接。服务启动时会扫描最近 200 条频道消息，尽力清理本 bot 发出的历史残留 `#fallback` 链接；如果 bot 没有删除权限，仍需手动删除。
