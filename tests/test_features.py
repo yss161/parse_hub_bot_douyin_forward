@@ -429,29 +429,13 @@ class FallbackTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.deleted: list[tuple[int, int]] = []
 
-            async def get_chat_history(self, chat_id: int, limit: int):
-                for message in _messages:
-                    yield message
-
             async def delete_messages(self, chat_id: int, message_id: int) -> None:
                 self.deleted.append((chat_id, message_id))
-
-        class _User:
-            def __init__(self, uid: int) -> None:
-                self.id = uid
-
-        _messages = [
-            types.SimpleNamespace(id=1, text="#fallback\nhttps://www.douyin.com/video/1", caption=None, from_user=_User(100)),
-            types.SimpleNamespace(id=2, text="#fallback\nhttps://www.douyin.com/video/2", caption=None, from_user=_User(300)),
-            types.SimpleNamespace(id=3, text="普通消息", caption=None, from_user=_User(100)),
-            types.SimpleNamespace(id=4, text=None, caption="#fallback https://www.douyin.com/video/3", from_user=_User(100)),
-        ]
 
         service = FallbackService.__new__(FallbackService)
         service._cli = _Cli()
         service._chat_id = -100123
-        service._self_id = 100
-        service.settings = types.SimpleNamespace(fallback_marker="#fallback")
+        service.settings = types.SimpleNamespace(fallback_cleanup_ids=[1, 4])
 
         deleted = asyncio.run(service._cleanup_stale_links())
 

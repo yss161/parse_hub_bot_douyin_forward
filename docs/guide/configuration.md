@@ -69,6 +69,7 @@ outline: deep
 | `FORWARDER_FALLBACK_TIMEOUT` | `180` | 等待出片秒数；超时删除频道链接，只私聊 owner 保留原始链接 |
 | `FORWARDER_FALLBACK_DELETE_LINK` | `true` | 成功后删除我们发的链接 |
 | `FORWARDER_FALLBACK_MARKER` | `#fallback` | 链接消息前缀 |
+| `FORWARDER_FALLBACK_CLEANUP_IDS` | 空 | 启动时按消息 ID 删除历史残留链接，逗号分隔；Bot API 不能读取频道历史 |
 | `FORWARDER_VIDEO_AS_LIVE` | `true` | 兜底实况视频是否还原成 Live Photo |
 | `FORWARDER_VIDEO_AS_LIVE_MAX_SECONDS` | `10` | 转换最大秒数 |
 | `FORWARDER_VIDEO_AS_LIVE_MAX_MB` | `10` | 转换最大体积 |

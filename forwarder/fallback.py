@@ -138,30 +138,23 @@ class FallbackService:
         self._replay_task = None
         self.enabled = False
 
-    async def _cleanup_stale_links(self, limit: int = 200) -> int:
-        """清理频道里历史残留的 #fallback 链接（只删本 bot 发出的消息）。"""
-        marker = (self.settings.fallback_marker or "#fallback").strip()
-        if not marker or self._cli is None or self._chat_id is None:
+    async def _cleanup_stale_links(self) -> int:
+        """按配置的消息 ID 清理频道里历史残留的兜底链接。
+
+        Telegram Bot API 不允许 bot 读取频道历史（messages.GetHistory 会返回
+        BOT_METHOD_INVALID），所以只能用 FORWARDER_FALLBACK_CLEANUP_IDS 指定已知 ID。
+        """
+        ids = [int(i) for i in (getattr(self.settings, "fallback_cleanup_ids", []) or [])]
+        if not ids or self._cli is None or self._chat_id is None:
             return 0
         deleted = 0
-        try:
-            async for message in self._cli.get_chat_history(self._chat_id, limit=limit):
-                text = str(getattr(message, "text", "") or getattr(message, "caption", "") or "")
-                if marker not in text or "douyin.com" not in text:
-                    continue
-                sender = getattr(message, "from_user", None)
-                sender_id = int(getattr(sender, "id", 0) or 0)
-                if self._self_id and sender_id != self._self_id:
-                    continue
-                try:
-                    await self._cli.delete_messages(self._chat_id, int(message.id))
-                    deleted += 1
-                except Exception as e:
-                    logger.warning(f"清理历史兜底链接失败（消息 {message.id}）: {e}")
-        except Exception as e:
-            logger.warning(f"扫描历史兜底链接失败（忽略）: {e}")
-        if deleted:
-            logger.info(f"已清理历史残留兜底链接 {deleted} 条")
+        for message_id in ids:
+            try:
+                await self._cli.delete_messages(self._chat_id, message_id)
+                deleted += 1
+                logger.info(f"已清理历史兜底链接消息 {message_id}")
+            except Exception as e:
+                logger.warning(f"清理历史兜底链接失败（消息 {message_id}）: {e}")
         return deleted
 
     async def submit(

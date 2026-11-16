@@ -704,7 +704,7 @@ BGM 放在评论区第一条，避免被十几张 Live Photo 埋掉。没有评�
 
 解析最终失败（重试达到上限）后，可以把原始链接发到兜底群/频道，让另一个解析 bot 出片；成功后删除我们发的链接。该功能默认关闭，需要配置 `FORWARDER_FALLBACK_CHAT`。
 
-发送前会先查一次抖音详情：作品已被删除、仅自己可见或明确不可用时**不会发兜底**（换解析 bot 也拿不到），失败记录会标记为 `unavailable`。只有仍可能解析的失败（地区版权、接口临时失败等）才进入兜底。服务启动时会扫描最近 200 条频道消息，清理本 bot 发出的历史残留 `#fallback` 链接（例如服务重启前已超时、但还没删除的链接）。
+发送前会先查一次抖音详情：作品已被删除、仅自己可见或明确不可用时**不会发兜底**（换解析 bot 也拿不到），失败记录会标记为 `unavailable`。只有仍可能解析的失败（地区版权、接口临时失败等）才进入兜底。Telegram Bot API 不允许 bot 读取频道历史，服务无法自动扫描旧消息；如果升级前有残留的 `#fallback` 链接，可用 `FORWARDER_FALLBACK_CLEANUP_IDS` 指定消息 ID，启动时删除。
 
 ### 两种部署形态
 
@@ -731,6 +731,7 @@ BGM 放在评论区第一条，避免被十几张 Live Photo 埋掉。没有评�
 | `FORWARDER_FALLBACK_TIMEOUT` | `180` | 等待出片秒数；超时删除频道里的链接，只把原始链接留在 owner 私信 |
 | `FORWARDER_FALLBACK_DELETE_LINK` | `true` | 成功后是否删除我们发的链接 |
 | `FORWARDER_FALLBACK_MARKER` | `#fallback` | 链接消息前缀，便于人工识别 |
+| `FORWARDER_FALLBACK_CLEANUP_IDS` | 空 | 启动时按消息 ID 删除历史残留链接，逗号分隔；Bot API 不能读取频道历史 |
 | `FORWARDER_VIDEO_AS_LIVE` | `true` | 是否把兜底实况视频转回 Live Photo |
 | `FORWARDER_VIDEO_AS_LIVE_MAX_SECONDS` | `10` | 转换的最大秒数 |
 | `FORWARDER_VIDEO_AS_LIVE_MAX_MB` | `10` | 转换的最大体积 |

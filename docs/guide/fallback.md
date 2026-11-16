@@ -136,4 +136,4 @@ journalctl -u douyin-forward -f | grep -i fallback
 FORWARDER_FALLBACK_CHAT=
 ```
 
-重启后不再启动监听，也不会发送任何兜底链接。服务启动时会扫描最近 200 条频道消息，尽力清理本 bot 发出的历史残留 `#fallback` 链接；如果 bot 没有删除权限，仍需手动删除。
+重启后不再启动监听，也不会发送任何兜底链接。Telegram Bot API 不允许 bot 读取频道历史，服务无法自动扫描旧链接；升级前残留的 `#fallback` 链接可用 `FORWARDER_FALLBACK_CLEANUP_IDS=2099,2101` 指定消息 ID，服务启动时删除。

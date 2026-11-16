@@ -83,6 +83,21 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_int_list(name: str, default: tuple[int, ...] = ()) -> list[int]:
+    raw = _env(name)
+    if not raw:
+        return list(default)
+    values: list[int] = []
+    for part in re.split(r"[,，;；\s]+", raw):
+        if not part:
+            continue
+        try:
+            values.append(int(part))
+        except ValueError:
+            continue
+    return values
+
+
 def _env_path(name: str, default: Path) -> Path:
     raw = _env(name)
     if not raw:
@@ -197,6 +212,10 @@ class ForwarderSettings:
     )
     # 链接消息前缀标记，便于人工识别与日志排查
     fallback_marker: str = field(default_factory=lambda: _env("FORWARDER_FALLBACK_MARKER", "#fallback"))
+    # 启动时按消息 ID 清理频道里历史残留的兜底链接（Bot API 不能读取频道历史，只能按已知 ID 删）
+    fallback_cleanup_ids: list[int] = field(
+        default_factory=lambda: _env_int_list("FORWARDER_FALLBACK_CLEANUP_IDS")
+    )
 
     # ─────────────── 失败重试策略 ───────────────
     # 临时错误最大尝试次数（永久错误只试 1 次；分类见 forwarder/failures.py）
