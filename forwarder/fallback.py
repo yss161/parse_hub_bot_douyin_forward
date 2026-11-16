@@ -196,11 +196,14 @@ class FallbackService:
             path = await message.download(file_name=str(target))
         except Exception as e:
             logger.warning(f"下载兜底媒体失败: {e}")
+            target.unlink(missing_ok=True)
             return None
         if not path:
+            target.unlink(missing_ok=True)
             return None
         p = Path(path)
         if not p.is_file() or p.stat().st_size <= 0:
+            p.unlink(missing_ok=True)
             return None
         return p, is_video
 
@@ -247,8 +250,17 @@ class FallbackService:
         temp_dir = self.settings.data_dir / "fallback_tmp" / str(pending.link_message_id)
         downloaded = await self._download_media(message, temp_dir)
         if downloaded is None:
+            try:
+                temp_dir.rmdir()
+            except OSError:
+                pass
             return
         media_path, is_video = downloaded
+        logger.info(
+            f"兜底消息 {message.id} 匹配链接 {pending.link_message_id}"
+            f"（回复 {getattr(message, 'reply_to_message_id', None) or '-'}，"
+            f"video={is_video}，同频道={self._same_target}）"
+        )
         handled = False
         try:
             meta = pending.meta
